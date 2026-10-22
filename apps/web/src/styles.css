@@ -1197,6 +1197,60 @@ footer span {
   }
 }
 
+.video-lab {
+  display: grid;
+  gap: 20px;
+}
+.trial-video-frame {
+  position: relative;
+  width: 100%;
+  background: #101b20;
+  overflow: hidden;
+  border-radius: 12px;
+}
+.trial-video-frame video {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.seat-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.seat-canvas.drawing {
+  pointer-events: auto;
+  touch-action: none;
+  cursor: crosshair;
+}
+.trial-playback {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+.trial-playback label {
+  flex: 1;
+  min-width: 130px;
+}
+.trial-playback output {
+  font-variant-numeric: tabular-nums;
+}
+.video-lab progress {
+  width: 100%;
+  accent-color: var(--green);
+}
+.video-lab .member-row {
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.video-lab .panel {
+  min-width: 0;
+}
+
 @media (max-width: 480px) {
   .table-grid {
     grid-template-columns: 1fr;

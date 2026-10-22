@@ -10,12 +10,13 @@ import type {
   TimeoutPolicy,
 } from '@restoradar/contracts';
 import './styles.css';
+import { VideoLab } from './VideoLab.tsx';
 
 type Me = {
   user: { id: string; name: string };
   restaurants: { id: string; name: string; role: Role }[];
 };
-type Tab = 'tables' | 'alerts' | 'tasks' | 'history' | 'settings';
+type Tab = 'tables' | 'alerts' | 'tasks' | 'history' | 'settings' | 'video';
 const roleNames: Record<Role, string> = { OWNER: 'المالك', MANAGER: 'المدير', WAITER: 'النادل' };
 const kindNames = { CUSTOMER_RECEPTION: 'استقبال الضيوف', TABLE_CLEANING: 'تنظيف الطاولة' };
 const alertNames = {
@@ -283,7 +284,12 @@ function App() {
     ...(management ? [{ key: 'alerts' as Tab, name: 'التنبيهات', icon: '◉' }] : []),
     { key: 'tasks', name: management ? 'مهام الفريق' : 'مهامي', icon: '☷' },
     ...(management ? [{ key: 'history' as Tab, name: 'السجل', icon: '◷' }] : []),
-    ...(role === 'OWNER' ? [{ key: 'settings' as Tab, name: 'الإعدادات', icon: '⚙' }] : []),
+    ...(role === 'OWNER'
+      ? [
+          { key: 'video' as Tab, name: 'تجربة الفيديو', icon: '▷' },
+          { key: 'settings' as Tab, name: 'الإعدادات', icon: '⚙' },
+        ]
+      : []),
   ];
   const pending = data?.alerts.filter((a) => a.status === 'PENDING') ?? [];
   const arrivals = pending.filter((a) => a.kind === 'NEW_CUSTOMERS');
@@ -332,7 +338,7 @@ function App() {
         </nav>
         <div className="sidebar-bottom">
           <div className="privacy">
-            ◈ الفيديو يبقى داخل المطعم<small>لا يوجد بث سحابي في هذه المرحلة</small>
+            ◈ معالجة الفيديو على خادمك<small>لا يوجد بث إلى خدمة تحليل خارجية</small>
           </div>
           <div className="profile">
             <span className="avatar">{me.user.name.slice(0, 1)}</span>
@@ -384,9 +390,11 @@ function App() {
                   ? 'كل مهمة لها مسؤول وخطوة تالية واضحة.'
                   : tab === 'alerts'
                     ? 'إقرار التنبيه مستقل عن إنجاز المهمة.'
-                    : tab === 'history'
-                      ? 'تسلسل واضح للجلسات والتعديلات والقرارات.'
-                      : 'أعدّ مطعمك وفريقك قبل بدء التشغيل.'}
+                    : tab === 'video'
+                      ? 'اختبر رصد الجلوس على فيديو مسجل وراجع النتائج.'
+                      : tab === 'history'
+                        ? 'تسلسل واضح للجلسات والتعديلات والقرارات.'
+                        : 'أعدّ مطعمك وفريقك قبل بدء التشغيل.'}
             </p>
           </div>
           <button
@@ -881,6 +889,9 @@ function App() {
                 </section>
               </>
             )}
+            {tab === 'video' && role === 'OWNER' && (
+              <VideoLab key={restaurantId} restaurantId={restaurantId} tables={data.tables} />
+            )}
             {tab === 'history' && management && (
               <>
                 <section className="panel">
@@ -1282,8 +1293,8 @@ function Settings({
         <h2>حالة التكاملات</h2>
         <ul className="integration-list">
           <li>
-            <span>الكاميرات وتحليل الفيديو</span>
-            <b>لم يُربطا بعد</b>
+            <span>الكاميرات الحية</span>
+            <b>لم تُربط بعد</b>
           </li>
           <li>
             <span>المزامنة السحابية</span>
@@ -1299,7 +1310,8 @@ function Settings({
           </li>
         </ul>
         <p className="fineprint">
-          لا يُرفع فيديو خام، ولا تُستخدم بيانات وجوه. جميع أحداث الرؤية الحالية محاكاة معلنة.
+          أحداث لوحة الطاولات محاكاة معلنة. تجربة الفيديو منفصلة ولا تغير الجلسات أو التنبيهات، ولا
+          تتضمن التعرف على الوجوه.
         </p>
       </section>
     </div>

@@ -12,3 +12,6 @@ artifacts/
 infra/ec2/ec2.env
 recordings/
 videos/
+__pycache__/
+*.pyc
+.venv/

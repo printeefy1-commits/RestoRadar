@@ -5,6 +5,8 @@ const app = await buildApp(pool, {
   simulatorEnabled: process.env.ENABLE_SIMULATOR === 'true',
   secureCookies: process.env.COOKIE_SECURE === 'true',
   publicOrigin: process.env.PUBLIC_ORIGIN,
+  videoLabUrl: process.env.VIDEO_LAB_URL,
+  videoLabRestaurantId: process.env.VIDEO_SAMPLE_RESTAURANT_ID,
   workers: true,
   logger: true,
 });
@@ -21,6 +23,14 @@ function shutdown() {
   })();
   return closing;
 }
+// Install handlers before listen() can announce readiness to the process manager.
+for (const signal of ['SIGINT', 'SIGTERM'] as const)
+  process.on(signal, () => {
+    void shutdown().catch((error) => {
+      app.log.error(error);
+      process.exitCode = 1;
+    });
+  });
 try {
   await app.listen({
     host: process.env.HOST ?? '127.0.0.1',
@@ -30,10 +40,3 @@ try {
   await shutdown();
   throw error;
 }
-for (const signal of ['SIGINT', 'SIGTERM'] as const)
-  process.on(signal, () => {
-    void shutdown().catch((error) => {
-      app.log.error(error);
-      process.exitCode = 1;
-    });
-  });

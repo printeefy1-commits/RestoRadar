@@ -1,4 +1,5 @@
 import { z } from 'zod';
+export * from './video-lab.ts';
 
 export const roleSchema = z.enum(['OWNER', 'MANAGER', 'WAITER']);
 export type Role = z.infer<typeof roleSchema>;

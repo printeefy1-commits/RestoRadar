@@ -1,0 +1,213 @@
+"""CPU-only recorded-video trial, invoked in a bounded child process."""
+
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+import cv2
+import numpy as np
+import onnxruntime as ort
+from rtmlib import RTMPose
+import supervision as sv
+
+from decisions import SeatingVerifier, mapped_table, seated_anchor
+from models import MODEL_DIR, manifest
+
+
+class CpuPose(RTMPose):
+    def __init__(self, path):
+        # RTMLib's default constructor creates an unbounded ORT threadpool.
+        # Configure the same pinned 17-keypoint model with a bounded CPU session.
+        self.model_input_size = (192, 256)
+        self.mean = (123.675, 116.28, 103.53)
+        self.std = (58.395, 57.12, 57.375)
+        self.to_openpose = False
+        self.backend = "onnxruntime"
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = 2
+        options.inter_op_num_threads = 1
+        self.session = ort.InferenceSession(
+            str(path), sess_options=options, providers=["CPUExecutionProvider"]
+        )
+
+
+class PersonDetector:
+    def __init__(self, path):
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = 2
+        options.inter_op_num_threads = 1
+        self.session = ort.InferenceSession(
+            str(path), sess_options=options, providers=["CPUExecutionProvider"]
+        )
+        self.input = self.session.get_inputs()[0]
+        self.size = tuple(
+            v if isinstance(v, int) and v > 0 else 416 for v in self.input.shape[2:]
+        )
+
+    def __call__(self, frame):
+        height, width = self.size
+        ratio = min(height / frame.shape[0], width / frame.shape[1])
+        image = np.full((height, width, 3), 114, dtype=np.uint8)
+        resized = cv2.resize(
+            frame, (int(frame.shape[1] * ratio), int(frame.shape[0] * ratio))
+        )
+        image[: resized.shape[0], : resized.shape[1]] = resized
+        tensor = np.ascontiguousarray(image.transpose(2, 0, 1)[None], dtype=np.float32)
+        outputs = self.session.run(None, {self.input.name: tensor})
+        predictions = outputs[0]
+        # The named person-only MMDeploy export returns NMS xyxy+score.
+        if predictions.ndim == 3 and predictions.shape[-1] == 5:
+            boxes, scores = predictions[0, :, :4] / ratio, predictions[0, :, 4]
+        else:
+            raise ValueError(
+                f"Unsupported detector export: {predictions.shape}; expected person-only NMS output"
+            )
+        keep = np.isfinite(boxes).all(axis=1) & np.isfinite(scores) & (scores >= 0.1)
+        boxes, scores = boxes[keep].copy(), scores[keep].copy()
+        boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0, frame.shape[1])
+        boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, frame.shape[0])
+        valid = ((boxes[:, 2] - boxes[:, 0]) >= 3) & ((boxes[:, 3] - boxes[:, 1]) >= 3)
+        boxes, scores = boxes[valid], scores[valid]
+        keep = np.argsort(-scores)[:30]
+        return sv.Detections(
+            xyxy=boxes[keep],
+            confidence=scores[keep],
+            class_id=np.zeros(len(keep), dtype=int),
+        )
+
+
+def atomic_json(path, value):
+    temporary = Path(str(path) + ".tmp")
+    temporary.write_text(json.dumps(value, allow_nan=False))
+    temporary.replace(path)
+
+
+def analyze(source, config, output, progress):
+    started = time.monotonic()
+    artifacts = manifest()
+    if not artifacts:
+        raise ValueError("Model artifacts are missing or have changed")
+    detector = PersonDetector(MODEL_DIR / "detector.onnx")
+    pose = CpuPose(MODEL_DIR / "pose.onnx")
+    tracker = sv.ByteTrack(
+        track_activation_threshold=0.35,
+        frame_rate=2,
+        lost_track_buffer=30,
+        minimum_matching_threshold=0.8,
+    )
+    cap = cv2.VideoCapture(str(source))
+    if not cap.isOpened():
+        raise ValueError("Video cannot be decoded")
+    table_ids = {r["tableId"] for r in config["regions"]}
+    verifier = SeatingVerifier(table_ids)
+    samples, events = [], []
+    first = config["startSeconds"]
+    end = first + config["durationSeconds"]
+    next_sample = first
+    previous_timestamp = None
+    last_timestamp = first
+    try:
+        if first > 1:
+            cap.set(cv2.CAP_PROP_POS_MSEC, (first - 0.5) * 1000)
+        # Decode sequentially: preserve source presentation time rather than wall-clock time.
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            seconds = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000
+            if not np.isfinite(seconds) or (
+                previous_timestamp is not None and seconds <= previous_timestamp
+            ):
+                raise ValueError("Unsupported or discontinuous video timestamps")
+            previous_timestamp = seconds
+            if seconds > end:
+                break
+            if seconds + 0.001 < next_sample:
+                continue
+            next_sample = seconds + 0.499
+            last_timestamp = seconds
+            h, w = frame.shape[:2]
+            image_ok = (
+                min(h, w) >= 100
+                and float(np.std(frame)) > 5
+                and 5 < float(np.mean(frame)) < 250
+            )
+            occupied, people = set(), []
+            if image_ok:
+                tracked = tracker.update_with_detections(detector(frame))
+                if len(tracked):
+                    # Never call RTMPose with an empty bbox array: it would infer on the whole frame.
+                    points, scores = pose(frame, bboxes=tracked.xyxy)
+                    for i, box in enumerate(tracked.xyxy):
+                        anchor = seated_anchor(points[i], scores[i])
+                        table_id = mapped_table(anchor, config["regions"], w, h)
+                        score = float(tracked.confidence[i])
+                        if table_id and score >= 0.35:
+                            occupied.add(table_id)
+                        people.append(
+                            {
+                                "box": [
+                                    float(box[0] / w),
+                                    float(box[1] / h),
+                                    float(box[2] / w),
+                                    float(box[3] / h),
+                                ],
+                                "trackId": int(tracked.tracker_id[i])
+                                if tracked.tracker_id is not None
+                                else None,
+                                "posture": "SEATED"
+                                if anchor is not None
+                                else "UNCERTAIN",
+                                "tableId": table_id,
+                                "score": round(score, 4),
+                            }
+                        )
+            states, confirmed = verifier.observe(seconds, occupied)
+            events.extend(confirmed)
+            samples.append(
+                {"seconds": round(seconds, 3), "people": people, "tables": states}
+            )
+            atomic_json(
+                progress,
+                {
+                    "progress": min(
+                        0.99, max(0, (seconds - first) / config["durationSeconds"])
+                    )
+                },
+            )
+    finally:
+        cap.release()
+    if len(samples) < 2:
+        raise ValueError("Selected interval contains too few decodable frames")
+    elapsed = time.monotonic() - started
+    report = {
+        "mode": "RECORDED_VIDEO_DRY_RUN",
+        "sourceId": config["sourceId"],
+        "models": {
+            "detector": "YOLOX-tiny (HumanArt ONNX)",
+            "pose": "RTMPose-t (body7 ONNX)",
+            "tracker": "ByteTrack (supervision 0.25.1)",
+            "artifacts": {k: v["sha256"] for k, v in artifacts.items()},
+        },
+        "startSeconds": first,
+        "endSeconds": last_timestamp,
+        "analyzedSamples": len(samples),
+        "processingSeconds": round(elapsed, 3),
+        "samplesPerProcessingSecond": round(len(samples) / elapsed, 3),
+        "departureEvaluated": False,
+        "regions": config["regions"],
+        "events": events,
+        "samples": samples,
+    }
+    atomic_json(output, report)
+
+
+if __name__ == "__main__":
+    analyze(
+        Path(os.environ["VIDEO_SAMPLE_PATH"]),
+        json.loads(Path(sys.argv[1]).read_text()),
+        Path(sys.argv[2]),
+        Path(sys.argv[3]),
+    )

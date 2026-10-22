@@ -55,7 +55,11 @@ const files = execFileSync(
       return false;
     const name = parts.at(-1);
     if (['.npmrc', 'credentials', 'id_rsa', 'id_ed25519'].includes(name)) return false;
-    if (/\.(mp4|mov|avi|mkv|webm|m4v|mpeg|mpg|pem|key|p12|pfx)$/i.test(name)) return false;
+    if (
+      file !== 'tests/fixtures/trial-preview.mp4' &&
+      /\.(mp4|mov|avi|mkv|webm|m4v|mpeg|mpg|pem|key|p12|pfx)$/i.test(name)
+    )
+      return false;
     return (
       name === '.env.example' ||
       (!name.startsWith('.env') && !name.endsWith('.env') && !name.endsWith('.log'))

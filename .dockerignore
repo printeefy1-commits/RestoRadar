@@ -12,6 +12,8 @@ playwright-report
 coverage
 **/recordings
 **/videos
+**/__pycache__
+**/.venv
 *.log
 **/.npmrc
 **/.aws

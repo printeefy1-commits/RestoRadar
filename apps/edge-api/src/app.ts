@@ -16,6 +16,7 @@ import {
 } from '@restoradar/domain';
 import { Repository, type Client, type DatabasePool } from '@restoradar/database';
 import { hashPassword, hashToken, newToken, verifyPassword } from './auth.ts';
+import { registerVideoLab } from './video-lab.ts';
 
 interface Identity {
   id: string;
@@ -48,6 +49,8 @@ export interface AppOptions {
   workers?: boolean;
   logger?: boolean;
   publicOrigin?: string;
+  videoLabUrl?: string;
+  videoLabRestaurantId?: string;
 }
 const alertOrder = {
   NEW_CUSTOMERS: 0,
@@ -114,7 +117,7 @@ export async function buildApp(pool: DatabasePool, options: AppOptions = {}) {
     reply.header('Referrer-Policy', 'same-origin');
     reply.header(
       'Content-Security-Policy',
-      "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+      "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
     );
     if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method)) {
       const origin = request.headers.origin;
@@ -312,6 +315,29 @@ export async function buildApp(pool: DatabasePool, options: AppOptions = {}) {
       });
       return { id, name: body.name, role: body.role };
     },
+  );
+  await registerVideoLab(
+    app,
+    options.videoLabUrl,
+    async (request, id) => {
+      const actor = await authorize(request, id);
+      if (actor.role !== 'OWNER')
+        throw new DomainError('FORBIDDEN', 'إعداد وتجربة الفيديو للمالك فقط', 403);
+      if (options.videoLabUrl) {
+        // A server-local demo file must not become shared footage for every tenant owner.
+        const boundId = options.videoLabRestaurantId;
+        const restaurants = boundId ? null : await pool.query('SELECT id FROM restaurants LIMIT 2');
+        const permittedId =
+          boundId || (restaurants?.rowCount === 1 ? restaurants.rows[0].id : null);
+        if (permittedId !== id)
+          throw new DomainError(
+            'VIDEO_TENANT_MISMATCH',
+            'فيديو التجربة غير مرتبط بهذا المطعم. يلزم ضبط ربطه على الخادم.',
+            403,
+          );
+      }
+    },
+    async (id) => new Set((await repository.read(id)).tables.map((t) => t.id)),
   );
   const webRoot = fileURLToPath(new URL('../../web/dist/', import.meta.url));
   if (existsSync(webRoot)) {

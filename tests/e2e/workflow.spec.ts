@@ -1,5 +1,7 @@
 import { test, expect, type BrowserContext, type Page } from '@playwright/test';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import type { TrialReport, VideoTrial } from '@restoradar/contracts';
 import { Pool, migrate, type DatabasePool } from '@restoradar/database';
 import { buildApp } from '../../apps/edge-api/src/app.ts';
 import { hashPassword } from '../../apps/edge-api/src/auth.ts';
@@ -171,4 +173,130 @@ test('desktop login is responsive and data is visibly stale after a failed refre
   await expect(page.getByText('الاتصال غير متاح', { exact: true })).toBeVisible();
   await expect(page.getByText('البيانات قديمة أو غير متاحة.', { exact: false })).toBeVisible();
   await expect(page.getByRole('button', { name: 'تصحيح الإشغال' }).first()).toBeDisabled();
+});
+
+test('Android video trial: authenticated preview, seat mapping, report and no live changes', async ({
+  page,
+}, testInfo) => {
+  await login(page, 'owner@e2e.invalid');
+  const sourceId = 'b'.repeat(64),
+    jobId = randomUUID();
+  const video = await readFile(new URL('../fixtures/trial-preview.mp4', import.meta.url));
+  let submitted: VideoTrial | undefined;
+  const browserErrors: string[] = [];
+  page.on('pageerror', (e) => browserErrors.push(e.message));
+  await page.route('**/api/restaurants/*/video-lab**', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith('/video')) {
+      const range = route.request().headers().range;
+      const match = range?.match(/^bytes=(\d+)-(\d*)$/);
+      const start = match ? Number(match[1]) : 0;
+      const end = match?.[2] ? Math.min(Number(match[2]), video.length - 1) : video.length - 1;
+      return route.fulfill({
+        status: match ? 206 : 200,
+        contentType: 'video/mp4',
+        headers: {
+          'Accept-Ranges': 'bytes',
+          'Content-Length': String(end - start + 1),
+          ...(match ? { 'Content-Range': `bytes ${start}-${end}/${video.length}` } : {}),
+        },
+        body: video.subarray(start, end + 1),
+      });
+    }
+    if (path.endsWith('/jobs/latest')) return route.fulfill({ json: null });
+    if (path.endsWith('/jobs') && route.request().method() === 'POST') {
+      submitted = route.request().postDataJSON() as VideoTrial;
+      return route.fulfill({ status: 202, json: { id: jobId, status: 'RUNNING', progress: 0.5 } });
+    }
+    if (path.endsWith(`/jobs/${jobId}`)) {
+      const report: TrialReport = {
+        mode: 'RECORDED_VIDEO_DRY_RUN',
+        sourceId,
+        startSeconds: 0,
+        endSeconds: 6,
+        models: {
+          detector: 'synthetic test graph',
+          pose: 'synthetic test graph',
+          tracker: 'ByteTrack',
+          artifacts: {},
+        },
+        analyzedSamples: 13,
+        processingSeconds: 2,
+        samplesPerProcessingSecond: 6.5,
+        departureEvaluated: false,
+        regions: submitted!.regions,
+        events: [
+          {
+            tableId: submitted!.regions[0].tableId,
+            kind: 'SEATING_CONFIRMED',
+            observedSeconds: 0,
+            confirmedSeconds: 5,
+          },
+        ],
+        samples: [
+          {
+            seconds: 5,
+            people: [
+              {
+                box: [0.1, 0.1, 0.4, 0.8],
+                trackId: 1,
+                posture: 'SEATED',
+                tableId: submitted!.regions[0].tableId,
+                score: 0.9,
+              },
+            ],
+            tables: { [submitted!.regions[0].tableId]: 'OCCUPIED' },
+          },
+        ],
+      };
+      return route.fulfill({ json: { id: jobId, status: 'COMPLETED', progress: 1, report } });
+    }
+    return route.fulfill({
+      json: {
+        enabled: true,
+        models: 'READY',
+        source: { id: sourceId, duration: 8, width: 320, height: 240, bytes: video.length },
+      },
+    });
+  });
+  const response = await page.request.post(`${address}/api/restaurants/${restaurantId}/commands`, {
+    data: { commandId: randomUUID(), command: { type: 'table.create', name: 'طاولة الفيديو' } },
+  });
+  expect(response.ok()).toBe(true);
+  await page.getByRole('button', { name: 'تحديث', exact: false }).click();
+  const before = (
+    await page.request.get(`${address}/api/restaurants/${restaurantId}/dashboard`)
+  ).json();
+  await page.getByRole('button', { name: 'تجربة الفيديو', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'فيديو التجربة', exact: true })).toBeVisible();
+  await expect
+    .poll(() => page.locator('video').evaluate((element: HTMLVideoElement) => element.readyState))
+    .toBeGreaterThanOrEqual(1);
+  await page.getByLabel('الطاولة المرتبطة').selectOption({ label: 'طاولة الفيديو' });
+  await page.getByText('إضافة منطقة بالأرقام بدل الرسم', { exact: true }).click();
+  await page.getByLabel('البداية الأفقية %').fill('10');
+  await page.getByLabel('البداية الرأسية %').fill('20');
+  await page.getByLabel('العرض %').fill('20');
+  await page.getByLabel('الارتفاع %').fill('20');
+  await page.getByRole('button', { name: 'إضافة المنطقة', exact: true }).click();
+  await page.getByLabel('مدة الاختبار بالثواني').fill('6');
+  await page.getByRole('button', { name: 'تحليل الفيديو على CPU', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'نتيجة التجربة', exact: true })).toBeVisible();
+  expect(submitted?.regions[0]).toMatchObject({ x: 0.1, y: 0.2, width: 0.2, height: 0.2 });
+  await page.getByRole('button', { name: 'عرض اللحظة', exact: true }).click();
+  await expect
+    .poll(() => page.locator('video').evaluate((element: HTMLVideoElement) => element.currentTime))
+    .toBeCloseTo(5, 1);
+  const downloadPromise = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'تنزيل تقرير التجربة JSON', exact: true }).click();
+  expect((await downloadPromise).suggestedFilename()).toBe('restoradar-video-trial.json');
+  const after = await (
+    await page.request.get(`${address}/api/restaurants/${restaurantId}/dashboard`)
+  ).json();
+  const original = await before;
+  expect(after.sessions).toEqual(original.sessions);
+  expect(after.alerts).toEqual(original.alerts);
+  await noOverflow(page);
+  await page.screenshot({ path: testInfo.outputPath('android-video-trial.png'), fullPage: true });
+  expect(browserErrors).toEqual([]);
 });

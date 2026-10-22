@@ -1,0 +1,41 @@
+# Optional recorded-video trial. Never exposes a new public port or mutates live tables.
+services:
+  app:
+    networks: [default, video]
+    environment:
+      VIDEO_LAB_URL: http://video-lab:8000
+      VIDEO_SAMPLE_RESTAURANT_ID: ${VIDEO_SAMPLE_RESTAURANT_ID:-}
+      NO_PROXY: video-lab,localhost,127.0.0.1,::1
+      no_proxy: video-lab,localhost,127.0.0.1,::1
+    depends_on:
+      video-lab: { condition: service_healthy }
+
+  video-lab:
+    image: restoradar-video-lab:${APP_IMAGE_TAG:-local}
+    build:
+      context: ../..
+      dockerfile: apps/vision-lab/Dockerfile
+    init: true
+    networks: [video]
+    volumes:
+      - ../../videos:/recordings:ro
+      - vision_models:/models
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=256m
+    mem_limit: 1536m
+    cpus: 1.5
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    restart: unless-stopped
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options: { max-size: '10m', max-file: '3' }
+
+volumes:
+  vision_models:
+
+networks:
+  video:

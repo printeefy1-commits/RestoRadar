@@ -1,0 +1,71 @@
+import { z } from 'zod';
+
+// Normalized rectangles enclose the expected seated hips, not the tabletop.
+export const seatRegionSchema = z
+  .object({
+    id: z.uuid(),
+    tableId: z.uuid(),
+    x: z.number().min(0).max(1),
+    y: z.number().min(0).max(1),
+    width: z.number().min(0.01).max(1),
+    height: z.number().min(0.01).max(1),
+  })
+  .strict()
+  .refine((r) => r.x + r.width <= 1.000001 && r.y + r.height <= 1.000001);
+export const videoTrialSchema = z
+  .object({
+    sourceId: z.string().regex(/^[a-f0-9]{64}$/),
+    startSeconds: z.number().min(0).max(86400),
+    durationSeconds: z.number().int().min(6).max(120),
+    regions: z.array(seatRegionSchema).min(1).max(40),
+  })
+  .strict()
+  .superRefine((v, ctx) => {
+    if (new Set(v.regions.map((r) => r.id)).size !== v.regions.length)
+      ctx.addIssue({ code: 'custom', message: 'Repeated region identifiers' });
+  });
+export type SeatRegion = z.infer<typeof seatRegionSchema>;
+export type VideoTrial = z.infer<typeof videoTrialSchema>;
+export interface VideoLabStatus {
+  enabled: boolean;
+  models: 'DOWNLOADING' | 'READY' | 'ERROR';
+  message?: string;
+  source: { id: string; duration: number; width: number; height: number; bytes: number } | null;
+}
+export interface TrialPerson {
+  box: [number, number, number, number];
+  trackId: number | null;
+  posture: 'SEATED' | 'UNCERTAIN';
+  tableId: string | null;
+  score: number;
+}
+export interface TrialReport {
+  mode: 'RECORDED_VIDEO_DRY_RUN';
+  sourceId: string;
+  models: { detector: string; pose: string; tracker: string; artifacts: Record<string, string> };
+  startSeconds: number;
+  endSeconds: number;
+  analyzedSamples: number;
+  processingSeconds: number;
+  samplesPerProcessingSecond: number;
+  departureEvaluated: false;
+  regions: SeatRegion[];
+  events: {
+    tableId: string;
+    kind: 'SEATING_CONFIRMED';
+    observedSeconds: number;
+    confirmedSeconds: number;
+  }[];
+  samples: {
+    seconds: number;
+    people: TrialPerson[];
+    tables: Record<string, 'OCCUPIED' | 'UNKNOWN'>;
+  }[];
+}
+export interface TrialJob {
+  id: string;
+  status: 'RUNNING' | 'COMPLETED' | 'FAILED';
+  progress: number;
+  message?: string;
+  report?: TrialReport;
+}
