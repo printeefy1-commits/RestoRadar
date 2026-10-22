@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+*.log
+playwright-report/
+test-results/
+.secrets/
+artifacts/
+infra/ec2/ec2.env
+recordings/
+videos/

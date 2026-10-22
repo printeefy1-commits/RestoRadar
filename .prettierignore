@@ -1,0 +1,10 @@
+node_modules
+dist
+package-lock.json
+REQUIREMENTS.md
+test-results
+playwright-report
+.env*
+artifacts
+.secrets
+infra/ec2/ec2.env
