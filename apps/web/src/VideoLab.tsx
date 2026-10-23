@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SeatRegion, Table, TrialJob, VideoLabStatus } from '@restoradar/contracts';
+import { seatRegionSchema } from '@restoradar/contracts';
 import { evidenceLabels, trialEvidence } from './video-evidence.ts';
 
 async function request<T>(url: string, body?: unknown): Promise<T> {
@@ -41,6 +42,7 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
   );
   const [startSeconds, setStartSeconds] = useState(0);
   const [durationSeconds, setDurationSeconds] = useState(60);
+  const [detectionMode, setDetectionMode] = useState<'FULL_FRAME' | 'SEAT_FOCUS'>('FULL_FRAME');
   const video = useRef<HTMLVideoElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const sourceId = useRef<string | null>(null);
@@ -176,6 +178,7 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
           sourceId: status.source.id,
           startSeconds,
           durationSeconds,
+          detectionMode,
           regions,
         }),
       );
@@ -327,6 +330,51 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
             <div className="settings-grid">
               <section className="panel">
                 <h2>مناطق المقاعد</h2>
+                <label>
+                  استيراد مناطق من تقرير JSON
+                  <input
+                    type="file"
+                    accept="application/json,.json"
+                    disabled={running}
+                    onChange={async (event) => {
+                      const file = event.currentTarget.files?.[0];
+                      event.currentTarget.value = '';
+                      if (!file) return;
+                      try {
+                        if (file.size > 10 * 1024 * 1024)
+                          throw new Error('حجم التقرير يتجاوز 10 ميغابايت');
+                        const previous = JSON.parse(await file.text());
+                        if (previous?.sourceId !== sourceId.current)
+                          throw new Error('التقرير يخص ملف فيديو مختلفًا؛ لم تُستورد المناطق');
+                        const restored = seatRegionSchema
+                          .array()
+                          .min(1)
+                          .max(40)
+                          .safeParse(previous.regions);
+                        if (
+                          !restored.success ||
+                          new Set(restored.data.map((r) => r.id)).size !== restored.data.length
+                        )
+                          throw new Error('مناطق التقرير غير صالحة');
+                        if (restored.data.some((r) => !validTables.has(r.tableId)))
+                          throw new Error('بعض طاولات التقرير غير موجودة في هذا المطعم');
+                        setRegions(restored.data);
+                        setDraft(null);
+                        setDrawing(false);
+                        setError('');
+                      } catch (error) {
+                        setError(
+                          error instanceof SyntaxError
+                            ? 'تعذر قراءة تقرير JSON'
+                            : (error as Error).message,
+                        );
+                      }
+                    }}
+                  />
+                </label>
+                <p className="muted">
+                  استورد المناطق نفسها للمقارنة بعد التحديث. يستورد هذا الخيار مناطق المقاعد فقط.
+                </p>
                 <p className="muted">
                   أوقف الفيديو عند ظهور ضيف جالس. اختر الطاولة وارسم مستطيلًا حول موضع حوضه المتوقع
                   على المقعد، لا حول سطح الطاولة. أضف منطقة لكل مقعد ظاهر.
@@ -441,6 +489,25 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                   الجسم قد يمنع التأكيد.
                 </p>
                 <label>
+                  طريقة رصد الأشخاص
+                  <select
+                    disabled={running}
+                    value={detectionMode}
+                    onChange={(event) =>
+                      setDetectionMode(event.target.value as typeof detectionMode)
+                    }
+                  >
+                    <option value="FULL_FRAME">الصورة كاملة · الرصد الحالي</option>
+                    <option value="SEAT_FOCUS">الصورة ومناطق المقاعد · تجربة أبطأ</option>
+                  </select>
+                </label>
+                {detectionMode === 'SEAT_FOCUS' && (
+                  <p className="muted">
+                    نفحص مناطق المقاعد بتكبير أعلى لتحسين فرص رصد الأشخاص الصغار في الصورة. التجربة
+                    تدعم أربع طاولات كحد أقصى، ولا تضمن تأكيد الجلوس عند حجب الجسم.
+                  </p>
+                )}
+                <label>
                   بداية المقطع بالثواني
                   <input
                     type="number"
@@ -470,6 +537,8 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                     status.models !== 'READY' ||
                     !regions.length ||
                     regions.some((r) => !validTables.has(r.tableId)) ||
+                    (detectionMode === 'SEAT_FOCUS' &&
+                      new Set(regions.map((r) => r.tableId)).size > 4) ||
                     durationSeconds < 6 ||
                     durationSeconds > 120
                   }
@@ -493,6 +562,12 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                 {report && (
                   <>
                     <h3>نتيجة التجربة</h3>
+                    <p>
+                      طريقة الرصد في التقرير:{' '}
+                      {report.detectionMode === 'SEAT_FOCUS'
+                        ? 'الصورة ومناطق المقاعد'
+                        : 'الصورة كاملة'}
+                    </p>
                     <p>
                       عولجت {report.analyzedSamples} عينة خلال {report.processingSeconds.toFixed(1)}{' '}
                       ثانية.

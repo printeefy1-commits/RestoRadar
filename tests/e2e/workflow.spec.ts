@@ -347,6 +347,7 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
         processingSeconds: 2,
         samplesPerProcessingSecond: 6.5,
         departureEvaluated: false,
+        detectionMode: submitted!.detectionMode,
         regions: submitted!.regions,
         events: [
           {
@@ -424,9 +425,15 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
   await page.getByLabel('العرض %').fill('20');
   await page.getByLabel('الارتفاع %').fill('20');
   await page.getByRole('button', { name: 'إضافة المنطقة', exact: true }).click();
+  await expect(page.getByLabel('طريقة رصد الأشخاص')).toHaveValue('FULL_FRAME');
+  await page.getByLabel('طريقة رصد الأشخاص').selectOption('SEAT_FOCUS');
   await page.getByLabel('مدة الاختبار بالثواني').fill('6');
   await page.getByRole('button', { name: 'تحليل الفيديو على CPU', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'نتيجة التجربة', exact: true })).toBeVisible();
+  expect(submitted?.detectionMode).toBe('SEAT_FOCUS');
+  await expect(
+    page.getByText('طريقة الرصد في التقرير: الصورة ومناطق المقاعد', { exact: true }),
+  ).toBeVisible();
   expect(submitted?.regions[0]).toMatchObject({ x: 0.1, y: 0.2, width: 0.2, height: 0.2 });
   await page.getByRole('button', { name: 'عرض اللحظة', exact: true }).click();
   await expect
@@ -482,6 +489,21 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
   await expect.poll(bluePixels).toBeGreaterThan(0);
   await page.getByRole('button', { name: 'حذف المنطقة 1', exact: true }).click();
   await expect.poll(bluePixels).toBe(0);
+  const importReport = page.getByLabel('استيراد مناطق من تقرير JSON');
+  await importReport.setInputFiles({
+    name: 'wrong-source.json',
+    mimeType: 'application/json',
+    buffer: Buffer.from(JSON.stringify({ sourceId: 'c'.repeat(64), regions: submitted!.regions })),
+  });
+  await expect(page.getByRole('alert')).toContainText('التقرير يخص ملف فيديو مختلفًا');
+  await expect.poll(bluePixels).toBe(0);
+  await importReport.setInputFiles({
+    name: 'baseline.json',
+    mimeType: 'application/json',
+    buffer: Buffer.from(JSON.stringify({ sourceId, regions: submitted!.regions })),
+  });
+  await expect.poll(bluePixels).toBeGreaterThan(0);
+  await expect(page.getByRole('alert')).toHaveCount(0);
   const downloadPromise = page.waitForEvent('download');
   await page.getByRole('button', { name: 'تنزيل تقرير التجربة JSON', exact: true }).click();
   expect((await downloadPromise).suggestedFilename()).toBe('restoradar-video-trial.json');

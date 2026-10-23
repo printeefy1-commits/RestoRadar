@@ -47,7 +47,9 @@ beforeAll(async () => {
   });
   backend.post('/restaurants/:restaurantId/jobs', (request, reply) => {
     expect(request.params).toEqual({ restaurantId: tenant });
-    expect(request.body).toEqual(trial);
+    const mode = (request.body as { detectionMode?: string }).detectionMode;
+    expect(['FULL_FRAME', 'SEAT_FOCUS', undefined]).toContain(mode);
+    expect(request.body).toEqual(mode ? { ...trial, detectionMode: mode } : trial);
     return reply.code(202).send({ id: randomUUID(), status: 'RUNNING', progress: 0 });
   });
   backend.get('/restaurants/:restaurantId/jobs/latest', () => null);
@@ -161,6 +163,19 @@ describe('owner-only recorded-video gateway', () => {
         })
       ).statusCode,
     ).toBe(416);
+  });
+  it('forwards an owner’s explicit focused mode and rejects unsupported modes', async () => {
+    const send = (detectionMode: string) =>
+      app.inject({
+        method: 'POST',
+        url: `/api/restaurants/${tenant}/video-lab/jobs`,
+        headers: { cookie: identities.OWNER.cookie },
+        payload: { ...trial, detectionMode },
+      });
+    const initial = calls;
+    expect((await send('unexpected')).statusCode).toBe(400);
+    expect(calls).toBe(initial);
+    expect((await send('SEAT_FOCUS')).statusCode).toBe(202);
   });
   it('validates table ownership, bounds and same-origin without mutating live state', async () => {
     const send = (payload: unknown, headers = {}) =>

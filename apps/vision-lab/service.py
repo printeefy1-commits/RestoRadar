@@ -10,12 +10,14 @@ import tempfile
 import threading
 import time
 from uuid import UUID, uuid4
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from models import digest, prepare
+from decisions import MAX_FOCUS_TABLES
 
 ROOT = Path(__file__).resolve().parent
 SOURCE = Path(os.environ.get("VIDEO_SAMPLE_PATH", "/recordings/restaurant-demo.mp4"))
@@ -49,11 +51,19 @@ class Trial(BaseModel):
     startSeconds: float = Field(ge=0, le=86400)
     durationSeconds: int = Field(ge=6, le=120)
     regions: list[Region] = Field(min_length=1, max_length=40)
+    detectionMode: Literal["FULL_FRAME", "SEAT_FOCUS"] = "FULL_FRAME"
 
     @model_validator(mode="after")
     def unique_regions(self):
         if len({r.id for r in self.regions}) != len(self.regions):
             raise ValueError("Repeated regions")
+        if (
+            self.detectionMode == "SEAT_FOCUS"
+            and len({r.tableId for r in self.regions}) > MAX_FOCUS_TABLES
+        ):
+            raise ValueError(
+                "الرصد المركّز يدعم أربع طاولات كحد أقصى في التجربة الواحدة"
+            )
         return self
 
 

@@ -20,6 +20,7 @@ from decisions import (
     seating_evidence,
 )
 from models import MODEL_DIR, manifest
+from focused_detection import MAX_FOCUS_TABLES, detect_with_seat_focus
 
 
 class CpuPose(RTMPose):
@@ -92,6 +93,14 @@ def atomic_json(path, value):
 
 def analyze(source, config, output, progress):
     started = time.monotonic()
+    detection_mode = config.get("detectionMode", "FULL_FRAME")
+    if detection_mode not in ("FULL_FRAME", "SEAT_FOCUS"):
+        raise ValueError("Unsupported detection mode")
+    if (
+        detection_mode == "SEAT_FOCUS"
+        and len({r["tableId"] for r in config["regions"]}) > MAX_FOCUS_TABLES
+    ):
+        raise ValueError("Focused detection supports at most four tables per trial")
     artifacts = manifest()
     if not artifacts:
         raise ValueError("Model artifacts are missing or have changed")
@@ -142,8 +151,14 @@ def analyze(source, config, output, progress):
             )
             occupied, people = set(), []
             detected_boxes = 0
+            focus_crops = 0
             if image_ok:
-                detections = detector(frame)
+                if detection_mode == "SEAT_FOCUS":
+                    detections, focus_crops = detect_with_seat_focus(
+                        detector, frame, config["regions"]
+                    )
+                else:
+                    detections = detector(frame)
                 detected_boxes = len(detections)
                 tracked = tracker.update_with_detections(detections)
                 if len(tracked):
@@ -208,6 +223,7 @@ def analyze(source, config, output, progress):
                 {
                     "seconds": round(seconds, 3),
                     "detectedBoxes": detected_boxes,
+                    "focusCrops": focus_crops,
                     "people": people,
                     "tables": states,
                 }
@@ -227,6 +243,7 @@ def analyze(source, config, output, progress):
     elapsed = time.monotonic() - started
     report = {
         "mode": "RECORDED_VIDEO_DRY_RUN",
+        "detectionMode": detection_mode,
         "sourceId": config["sourceId"],
         "models": {
             "detector": "YOLOX-tiny (HumanArt ONNX)",

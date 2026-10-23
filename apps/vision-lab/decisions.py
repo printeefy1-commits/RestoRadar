@@ -4,6 +4,7 @@ import math
 
 MIN_DETECTION_SCORE = 0.35
 MIN_KEYPOINT_SCORE = 0.4
+MAX_FOCUS_TABLES = 4
 
 
 def seated_anchor(points, scores, threshold=MIN_KEYPOINT_SCORE):

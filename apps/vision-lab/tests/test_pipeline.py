@@ -25,6 +25,8 @@ import analyze
 from decisions import SeatingVerifier, mapped_table, seated_anchor, seating_evidence
 import models
 import service
+import supervision as sv
+from focused_detection import detect_with_seat_focus, seat_crops
 
 
 def constant_graph(path, shape, outputs):
@@ -116,6 +118,93 @@ class DecisionTests(unittest.TestCase):
             {"tableId": t, "x": 0, "y": 0, "width": 1, "height": 1} for t in ("a", "b")
         ]
         self.assertIsNone(mapped_table([10, 10], regions, 100, 100))
+
+
+class FocusedDetectionTests(unittest.TestCase):
+    def test_crop_coordinates_and_duplicate_views_are_merged_before_tracking(self):
+        frame = np.zeros((1000, 1000, 3), np.uint8)
+        regions = [
+            {"tableId": "table", "x": 0.4, "y": 0.4, "width": 0.1, "height": 0.2}
+        ]
+        shapes = []
+
+        def detector(image):
+            shapes.append(image.shape[:2])
+            if image.shape[:2] == (1000, 1000):
+                boxes, scores = [[400, 400, 500, 600]], [0.4]
+            else:
+                boxes, scores = [[50, 150, 150, 350], [0, 20, 30, 80]], [0.9, 0.8]
+            return sv.Detections(
+                xyxy=np.array(boxes, np.float32),
+                confidence=np.array(scores, np.float32),
+                class_id=np.zeros(len(boxes), int),
+            )
+
+        detected, crops = detect_with_seat_focus(detector, frame, regions)
+        self.assertEqual(crops, 1)
+        self.assertEqual(shapes[0], (1000, 1000))
+        np.testing.assert_allclose(shapes[1], (400, 200), atol=1)
+        np.testing.assert_allclose(
+            detected.xyxy, [[400, 400, 500, 600], [350, 270, 380, 330]]
+        )
+        np.testing.assert_allclose(detected.confidence, [0.9, 0.8])
+
+    def test_bounds_empty_detections_and_cpu_limits(self):
+        regions = [
+            {"tableId": "table", "x": 0.95, "y": 0.9, "width": 0.05, "height": 0.1}
+        ]
+        for x1, y1, x2, y2 in seat_crops(regions, 640, 480):
+            self.assertTrue(0 <= x1 < x2 <= 640 and 0 <= y1 < y2 <= 480)
+        detected, _ = detect_with_seat_focus(
+            lambda _: sv.Detections.empty(), np.zeros((480, 640, 3), np.uint8), regions
+        )
+        self.assertEqual(len(detected), 0)
+        self.assertEqual(
+            seat_crops(
+                [{**regions[0], "x": 0, "y": 0, "width": 1, "height": 1}], 640, 480
+            ),
+            [],
+        )
+        self.assertEqual(
+            len(seat_crops(regions + [{**regions[0], "tableId": "other"}], 640, 480)), 1
+        )
+        excessive = [{**regions[0], "tableId": str(i)} for i in range(5)]
+        with self.assertRaisesRegex(ValueError, "four tables"):
+            seat_crops(excessive, 640, 480)
+
+    def test_request_validation_preserves_default_mode_and_limits_focused_trials(self):
+        region = {
+            "id": str(uuid4()),
+            "tableId": str(uuid4()),
+            "x": 0.1,
+            "y": 0.2,
+            "width": 0.2,
+            "height": 0.3,
+        }
+        trial = {
+            "sourceId": "a" * 64,
+            "startSeconds": 0,
+            "durationSeconds": 10,
+            "regions": [region],
+        }
+        self.assertEqual(service.Trial(**trial).detectionMode, "FULL_FRAME")
+        self.assertEqual(
+            service.Trial(**{**trial, "detectionMode": "SEAT_FOCUS"}).detectionMode,
+            "SEAT_FOCUS",
+        )
+        with self.assertRaises(ValueError):
+            service.Trial(**{**trial, "detectionMode": "untrusted"})
+        with self.assertRaises(ValueError):
+            service.Trial(
+                **{
+                    **trial,
+                    "detectionMode": "SEAT_FOCUS",
+                    "regions": [
+                        {**region, "id": str(uuid4()), "tableId": str(uuid4())}
+                        for _ in range(5)
+                    ],
+                }
+            )
 
 
 class RuntimeTests(unittest.TestCase):
@@ -249,6 +338,30 @@ class RuntimeTests(unittest.TestCase):
             all(set(s["tables"].values()) == {"UNKNOWN"} for s in report["samples"])
         )
         self.assertTrue(all(s["detectedBoxes"] == 0 for s in report["samples"]))
+
+    def test_focused_mode_runs_real_onnx_crops_and_records_mode(self):
+        config = {
+            **self.config,
+            "detectionMode": "SEAT_FOCUS",
+            "regions": [
+                {
+                    **self.config["regions"][0],
+                    "x": 0.2,
+                    "y": 0.3,
+                    "width": 0.2,
+                    "height": 0.3,
+                }
+            ],
+        }
+        output = self.root / "focused.json"
+        analyze.analyze(self.source, config, output, self.root / "progress.json")
+        report = json.loads(output.read_text())
+        self.assertEqual(report["detectionMode"], "SEAT_FOCUS")
+        self.assertTrue(all(s["focusCrops"] == 1 for s in report["samples"]))
+        self.assertTrue(all(s["detectedBoxes"] >= 1 for s in report["samples"]))
+        self.assertEqual(report["evidencePolicy"]["minDetectionScore"], 0.35)
+        self.assertEqual(report["evidencePolicy"]["minKeypointScore"], 0.4)
+        self.assertEqual(report["evidencePolicy"]["seatingSeconds"], 5)
 
     def test_low_detection_score_does_not_confirm_even_when_pose_and_mapping_match(
         self,

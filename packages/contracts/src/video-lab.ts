@@ -17,12 +17,18 @@ export const videoTrialSchema = z
     sourceId: z.string().regex(/^[a-f0-9]{64}$/),
     startSeconds: z.number().min(0).max(86400),
     durationSeconds: z.number().int().min(6).max(120),
+    detectionMode: z.enum(['FULL_FRAME', 'SEAT_FOCUS']).optional(),
     regions: z.array(seatRegionSchema).min(1).max(40),
   })
   .strict()
   .superRefine((v, ctx) => {
     if (new Set(v.regions.map((r) => r.id)).size !== v.regions.length)
       ctx.addIssue({ code: 'custom', message: 'Repeated region identifiers' });
+    if (v.detectionMode === 'SEAT_FOCUS' && new Set(v.regions.map((r) => r.tableId)).size > 4)
+      ctx.addIssue({
+        code: 'custom',
+        message: 'الرصد المركّز يدعم أربع طاولات كحد أقصى في التجربة الواحدة',
+      });
   });
 export type SeatRegion = z.infer<typeof seatRegionSchema>;
 export type VideoTrial = z.infer<typeof videoTrialSchema>;
@@ -51,6 +57,7 @@ export interface TrialPerson {
 }
 export interface TrialReport {
   mode: 'RECORDED_VIDEO_DRY_RUN';
+  detectionMode?: 'FULL_FRAME' | 'SEAT_FOCUS';
   sourceId: string;
   models: { detector: string; pose: string; tracker: string; artifacts: Record<string, string> };
   startSeconds: number;
@@ -71,6 +78,7 @@ export interface TrialReport {
     seconds: number;
     /** Detector boxes before ByteTrack filtering; not a unique person count. */
     detectedBoxes?: number;
+    focusCrops?: number;
     people: TrialPerson[];
     tables: Record<string, 'OCCUPIED' | 'UNKNOWN'>;
   }[];
