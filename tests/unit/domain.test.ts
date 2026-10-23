@@ -7,6 +7,7 @@ import {
   initialState,
   markMonitoringGap,
   processDeadlines,
+  removeMember,
 } from '@restoradar/domain';
 
 const owner: Actor = { id: randomUUID(), role: 'OWNER' };
@@ -521,5 +522,126 @@ describe('tasks, deadlines and authorization', () => {
       confirmedAt: '2026-10-22T10:00:30Z',
     });
     expect('observedAt' in cmd && cmd.observedAt).toBe(at(0));
+  });
+});
+
+describe('restaurant account removal', () => {
+  it.each(['CUSTOMER_RECEPTION', 'TABLE_CLEANING'] as const)(
+    'cancels only the removed user’s open %s tasks and retains completed and reassigned history',
+    (kind) => {
+      const f = fixture();
+      for (const status of ['ASSIGNED', 'ACCEPTED', 'COMPLETED', 'OTHER', 'REASSIGNED']) {
+        f.run({ type: 'table.create', name: status });
+        const tableId = f.s.tables.at(-1)!.id;
+        f.run(
+          {
+            type: 'simulation.transition',
+            tableId,
+            occupancy: 'OCCUPIED',
+            observedAt: at(0),
+            confirmedAt: at(5),
+          },
+          5,
+        );
+        if (kind === 'TABLE_CLEANING')
+          f.run(
+            {
+              type: 'simulation.transition',
+              tableId,
+              occupancy: 'EMPTY',
+              observedAt: at(6),
+              confirmedAt: at(36),
+            },
+            36,
+          );
+        const sourceId =
+          kind === 'CUSTOMER_RECEPTION' ? f.s.sessions.at(-1)!.id : f.s.cleaningCycles.at(-1)!.id;
+        f.run(
+          {
+            type: 'task.assign',
+            kind,
+            sourceId,
+            waiterId: status === 'OTHER' ? waiter2.id : waiter.id,
+            expectedVersion: 0,
+          },
+          40,
+        );
+        const task = f.s.tasks.at(-1)!;
+        if (['ACCEPTED', 'COMPLETED'].includes(status))
+          f.run(
+            { type: 'task.accept', taskId: task.id, expectedVersion: task.version },
+            41,
+            waiter,
+          );
+        if (status === 'COMPLETED')
+          f.run(
+            { type: 'task.complete', taskId: task.id, expectedVersion: f.s.tasks.at(-1)!.version },
+            42,
+            waiter,
+          );
+        if (status === 'REASSIGNED')
+          f.run(
+            {
+              type: 'task.assign',
+              kind,
+              sourceId,
+              waiterId: waiter2.id,
+              expectedVersion: task.version,
+            },
+            41,
+          );
+      }
+      const expired = processDeadlines(f.s, at(100));
+      const before = executeCommand(
+        expired,
+        {
+          type: 'alert.acknowledge',
+          alertId: expired.alerts.find((a) => a.sourceId === expired.tasks[0].currentAttemptId)!.id,
+        },
+        { actor: owner, now: at(100), waiterIds: [waiter.id, waiter2.id], simulatorEnabled: true },
+      );
+      const copy = structuredClone(before);
+      const next = removeMember(before, { ...waiter, name: 'Removed waiter' }, owner, at(101));
+      expect(before).toEqual(copy);
+      expect(next.tasks.slice(0, 2).map((t) => t.status)).toEqual(['CANCELLED', 'CANCELLED']);
+      expect(next.tasks.slice(0, 2).map((t) => t.cancelledReason)).toEqual([
+        'USER_DELETED',
+        'USER_DELETED',
+      ]);
+      expect(next.tasks.slice(2)).toEqual(before.tasks.slice(2));
+      const changedIds = new Set(before.tasks.slice(0, 2).map((t) => t.currentAttemptId));
+      for (const attempt of before.attempts)
+        expect(next.attempts.find((a) => a.id === attempt.id)).toEqual(
+          changedIds.has(attempt.id) ? { ...attempt, status: 'CANCELLED' } : attempt,
+        );
+      for (const key of ['sessions', 'assignments', 'cleaningCycles', 'tables'] as const)
+        expect(next[key]).toEqual(before[key]);
+      expect(next.audit.slice(0, -1)).toEqual(before.audit);
+      expect(next.audit.at(-1)).toMatchObject({
+        actorId: owner.id,
+        action: 'user.deleted',
+        context: { userId: waiter.id, cancelledTaskIds: before.tasks.slice(0, 2).map((t) => t.id) },
+      });
+      for (const alert of before.alerts)
+        expect(next.alerts.find((a) => a.id === alert.id)).toEqual(
+          changedIds.has(alert.sourceId) && alert.status === 'PENDING'
+            ? { ...alert, status: 'OBSOLETE', obsoleteReason: 'USER_DELETED' }
+            : alert,
+        );
+      expect(next.events.slice(0, before.events.length)).toEqual(before.events);
+      expect(next.events.slice(before.events.length)).toHaveLength(2);
+      expect(
+        next.alerts.filter((a) => changedIds.has(a.sourceId) && a.status === 'PENDING'),
+      ).toEqual([]);
+      expect(processDeadlines(next, at(200))).toEqual(next);
+    },
+  );
+  it('rejects non-owners and self-removal', () => {
+    const f = fixture();
+    const member = { ...waiter, name: 'Waiter' };
+    expect(() => removeMember(f.s, member, manager, at(0))).toThrow('إدارة الحسابات للمالك فقط');
+    expect(() => removeMember(f.s, { ...owner, name: 'Owner' }, owner, at(0))).toThrow(
+      'لا يمكن حذف حساب المالك الحالي',
+    );
   });
 });

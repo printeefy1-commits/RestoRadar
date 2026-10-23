@@ -156,6 +156,129 @@ test('Android-sized owner/waiter workflow: explicit setup, arrival, reception, d
   }
 });
 
+test('owner lists all roles and deletes an account with confirmation while self remains protected', async ({
+  page,
+}) => {
+  await login(page, 'owner@e2e.invalid');
+  const name = 'مدير للحذف';
+  expect(
+    (
+      await page.request.post(`${address}/api/restaurants/${restaurantId}/users`, {
+        data: { name, email: 'delete@e2e.invalid', password, role: 'MANAGER' },
+      })
+    ).ok(),
+  ).toBe(true);
+  await page.getByRole('button', { name: 'تحديث', exact: false }).click();
+  await page.getByRole('button', { name: 'الإعدادات', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'حسابك الحالي محمي' })).toBeDisabled();
+  const accounts = page
+    .locator('section.panel')
+    .filter({ has: page.getByRole('heading', { name: 'جميع حسابات المطعم', exact: true }) });
+  for (const email of ['owner@e2e.invalid', 'waiter@e2e.invalid', 'delete@e2e.invalid'])
+    await expect(accounts.getByText(email, { exact: true })).toBeVisible();
+  for (const role of ['المالك', 'المدير', 'النادل'])
+    await expect(accounts.getByText(role, { exact: true })).toBeVisible();
+  await noOverflow(page);
+  await expect(
+    page.getByRole('button', { name: 'حذف حساب نادل التجربة', exact: true }),
+  ).toBeVisible();
+  page.once('dialog', (dialog) => dialog.dismiss());
+  await page.getByRole('button', { name: `حذف حساب ${name}`, exact: true }).click();
+  await expect(page.getByRole('button', { name: `حذف حساب ${name}`, exact: true })).toBeVisible();
+  page.once('dialog', (dialog) => dialog.accept());
+  await page.getByRole('button', { name: `حذف حساب ${name}`, exact: true }).click();
+  await expect(page.getByRole('status')).toHaveText('حُذف الحساب من المطعم مع حفظ السجل');
+  await expect(page.getByRole('button', { name: `حذف حساب ${name}`, exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'السجل', exact: true }).click();
+  await expect(page.getByText('حذف حساب من المطعم', { exact: true })).toBeVisible();
+});
+
+test('deleting a waiter cancels an accepted task and allows manual reassignment with history intact', async ({
+  page,
+}) => {
+  await login(page, 'owner@e2e.invalid');
+  const base = `${address}/api/restaurants/${restaurantId}`;
+  const created = await page.request.post(`${base}/users`, {
+    data: { name: 'نادل مؤقت', email: 'temporary@e2e.invalid', password, role: 'WAITER' },
+  });
+  expect(created.ok()).toBe(true);
+  const temporaryId = (await created.json()).id;
+  const send = async (command: unknown) => {
+    expect(
+      (
+        await page.request.post(`${base}/commands`, { data: { commandId: randomUUID(), command } })
+      ).ok(),
+    ).toBe(true);
+  };
+  await send({ type: 'table.create', name: 'طاولة حذف الحساب' });
+  const snapshot = async () => (await page.request.get(`${base}/dashboard`)).json();
+  const table = (await snapshot()).tables.find(
+    (t: { name: string }) => t.name === 'طاولة حذف الحساب',
+  );
+  const confirmed = Date.now() - 100;
+  await send({
+    type: 'simulation.transition',
+    tableId: table.id,
+    occupancy: 'OCCUPIED',
+    observedAt: new Date(confirmed - 5000).toISOString(),
+    confirmedAt: new Date(confirmed).toISOString(),
+  });
+  const state = await snapshot();
+  const sourceId = state.assignments.find(
+    (a: { tableId: string }) => a.tableId === table.id,
+  ).sessionId;
+  await send({
+    type: 'task.assign',
+    kind: 'CUSTOMER_RECEPTION',
+    sourceId,
+    waiterId: temporaryId,
+    expectedVersion: 0,
+  });
+  const task = (await snapshot()).tasks.find((t: { sourceId: string }) => t.sourceId === sourceId);
+  const auth = await app.inject({
+    method: 'POST',
+    url: '/api/auth/login',
+    payload: { email: 'temporary@e2e.invalid', password },
+  });
+  expect(auth.statusCode).toBe(200);
+  expect(
+    (
+      await app.inject({
+        method: 'POST',
+        url: `/api/restaurants/${restaurantId}/commands`,
+        headers: { cookie: String(auth.headers['set-cookie']).split(';')[0] },
+        payload: {
+          commandId: randomUUID(),
+          command: { type: 'task.accept', taskId: task.id, expectedVersion: task.version },
+        },
+      })
+    ).statusCode,
+  ).toBe(200);
+  await page.getByRole('button', { name: 'تحديث', exact: false }).click();
+  await page.getByRole('button', { name: 'الإعدادات', exact: true }).click();
+  page.once('dialog', (dialog) => dialog.accept());
+  await page.getByRole('button', { name: 'حذف حساب نادل مؤقت', exact: true }).click();
+  await expect(page.getByRole('status')).toHaveText('حُذف الحساب من المطعم مع حفظ السجل');
+  await page.getByRole('button', { name: 'مهام الفريق', exact: true }).click();
+  const row = page.locator('article.list-row').filter({ hasText: 'طاولة حذف الحساب' });
+  await expect(row).toContainText('نادل مؤقت');
+  await expect(
+    row.getByText('أُلغيت لحذف حساب النادل؛ السجل محفوظ ويمكن إعادة الإسناد.', { exact: true }),
+  ).toBeVisible();
+  await row.getByRole('button', { name: 'إعادة التعيين', exact: true }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.locator('option').filter({ hasText: 'نادل مؤقت' })).toHaveCount(0);
+  await dialog.getByLabel('النادل', { exact: true }).selectOption(waiterId);
+  await dialog.getByRole('button', { name: 'تأكيد التعيين' }).click();
+  await expect(page.getByRole('status')).toHaveText('حُفظ تعيين المهمة');
+  const after = await snapshot();
+  expect(after.attempts.find((a: { id: string }) => a.id === task.currentAttemptId).status).toBe(
+    'CANCELLED',
+  );
+  expect(after.tasks.find((t: { id: string }) => t.id === task.id).status).toBe('ASSIGNED');
+  await noOverflow(page);
+});
+
 test('desktop login is responsive and data is visibly stale after a failed refresh', async ({
   page,
 }) => {
@@ -287,6 +410,23 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
   await expect
     .poll(() => page.locator('video').evaluate((element: HTMLVideoElement) => element.currentTime))
     .toBeCloseTo(5, 1);
+  // Inspect the actual canvas: blue seat pixels must disappear even with a retained report.
+  const bluePixels = () =>
+    page.locator('canvas').evaluate((canvas: HTMLCanvasElement) => {
+      const pixels = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height).data;
+      let count = 0;
+      for (let i = 0; i < pixels.length; i += 4)
+        if (pixels[i] === 66 && pixels[i + 1] === 133 && pixels[i + 2] === 255 && pixels[i + 3] > 0)
+          count++;
+      return count;
+    });
+  await expect.poll(bluePixels).toBeGreaterThan(0);
+  await page.getByRole('button', { name: 'حذف المنطقة 1', exact: true }).click();
+  await expect.poll(bluePixels).toBe(0);
+  await page.getByRole('button', { name: 'استخدام مناطق التقرير السابق', exact: true }).click();
+  await expect.poll(bluePixels).toBeGreaterThan(0);
+  await page.getByRole('button', { name: 'حذف المنطقة 1', exact: true }).click();
+  await expect.poll(bluePixels).toBe(0);
   const downloadPromise = page.waitForEvent('download');
   await page.getByRole('button', { name: 'تنزيل تقرير التجربة JSON', exact: true }).click();
   expect((await downloadPromise).suggestedFilename()).toBe('restoradar-video-trial.json');

@@ -192,6 +192,8 @@ export interface Member {
   id: string;
   name: string;
   role: Role;
+  /** Included only in the owner's account-management view. */
+  email?: string;
 }
 export interface Dashboard extends Omit<RestaurantState, 'events'> {
   members: Member[];

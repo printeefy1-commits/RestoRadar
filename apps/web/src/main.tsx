@@ -48,6 +48,7 @@ const auditNames: Record<string, string> = {
   'alert.acknowledge': 'إقرار تنبيه',
   'session.adjust': 'تعديل وقت جلسة',
   'user.created': 'إضافة مستخدم',
+  'user.deleted': 'حذف حساب من المطعم',
   'restaurant.initialized': 'إعداد المطعم',
   'simulation.transition': 'محاكاة انتقال إشغال',
   'simulation.vision': 'محاكاة فقد الرؤية',
@@ -60,13 +61,13 @@ class ApiError extends Error {
     super(message);
   }
 }
-async function api<T>(path: string, body?: unknown): Promise<T> {
+async function api<T>(path: string, body?: unknown, method = 'POST'): Promise<T> {
   const response = await fetch(`/api${path}`, {
     credentials: 'same-origin',
     cache: 'no-store',
     ...(body !== undefined
       ? {
-          method: 'POST',
+          method,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         }
@@ -191,7 +192,11 @@ function App() {
       success,
     );
   const memberName = (id: string | null) =>
-    data?.members.find((m) => m.id === id)?.name ?? 'مستخدم سابق';
+    data?.members.find((m) => m.id === id)?.name ??
+    String(
+      data?.audit.find((a) => a.action === 'user.deleted' && a.context.userId === id)?.context
+        .name ?? 'مستخدم سابق',
+    );
   const activeAssignment = (tableId: string) =>
     data?.assignments.find((a) => a.tableId === tableId && !a.endedAt);
   const openCycle = (tableId: string) =>
@@ -814,6 +819,20 @@ function App() {
                           </h2>
                           {tasks.map((t) => {
                             const attempt = data.attempts.find((a) => a.id === t.currentAttemptId)!;
+                            const canReassign =
+                              management &&
+                              (['ASSIGNED', 'ACCEPTED'].includes(t.status) ||
+                                (t.status === 'CANCELLED' &&
+                                  t.cancelledReason === 'USER_DELETED' &&
+                                  (t.kind === 'CUSTOMER_RECEPTION'
+                                    ? data.sessions.some((s) => s.id === t.sourceId && !s.endedAt)
+                                    : data.cleaningCycles.some(
+                                        (c) => c.id === t.sourceId && !c.readyAt,
+                                      ) &&
+                                      data.tables.some(
+                                        (table) =>
+                                          table.id === t.tableId && table.occupancy === 'EMPTY',
+                                      ))));
                             const due =
                               t.status === 'ASSIGNED'
                                 ? attempt.acceptanceDueAt
@@ -841,7 +860,11 @@ function App() {
                                     </small>
                                   )}
                                   {t.cancelledReason && (
-                                    <small>أُلغيت لتغيّر حالة الطاولة؛ السجل محفوظ.</small>
+                                    <small>
+                                      {t.cancelledReason === 'USER_DELETED'
+                                        ? 'أُلغيت لحذف حساب النادل؛ السجل محفوظ ويمكن إعادة الإسناد.'
+                                        : 'أُلغيت لتغيّر حالة الطاولة؛ السجل محفوظ.'}
+                                    </small>
                                   )}
                                 </div>
                                 {role === 'WAITER' &&
@@ -868,7 +891,7 @@ function App() {
                                       {t.status === 'ASSIGNED' ? 'قبول المهمة' : 'إكمال المهمة'}
                                     </button>
                                   )}
-                                {management && ['ASSIGNED', 'ACCEPTED'].includes(t.status) && (
+                                {canReassign && (
                                   <button
                                     className="secondary"
                                     disabled={busy || !online}
@@ -1000,6 +1023,9 @@ function App() {
                       <strong>{auditNames[a.action] ?? a.action}</strong>
                       <span>{memberName(a.actorId)}</span>
                       <small>{dateLabel(a.at)}</small>
+                      {a.action === 'user.deleted' && typeof a.context.name === 'string' && (
+                        <p>الحساب المحذوف: {a.context.name}</p>
+                      )}
                       {typeof a.context.reason === 'string' && <p>{a.context.reason}</p>}
                     </div>
                   ))}
@@ -1009,6 +1035,13 @@ function App() {
             {tab === 'settings' && role === 'OWNER' && (
               <Settings
                 data={data}
+                currentUserId={me!.user.id}
+                deleteUser={(id) =>
+                  action(
+                    () => api(`/restaurants/${restaurantId}/users/${id}`, {}, 'DELETE'),
+                    'حُذف الحساب من المطعم مع حفظ السجل',
+                  )
+                }
                 busy={busy || !online}
                 send={send}
                 addUser={(body) =>
@@ -1145,11 +1178,15 @@ function Settings({
   busy,
   send,
   addUser,
+  currentUserId,
+  deleteUser,
 }: {
   data: Dashboard;
   busy: boolean;
   send: (command: Command, success: string) => Promise<boolean>;
   addUser: (body: unknown) => Promise<boolean>;
+  currentUserId: string;
+  deleteUser: (id: string) => Promise<boolean>;
 }) {
   return (
     <div className="settings-grid">
@@ -1235,11 +1272,33 @@ function Settings({
             إضافة الطاولة
           </button>
         </form>
-        <h3>أعضاء الفريق</h3>
+      </section>
+      <section className="panel">
+        <h2>جميع حسابات المطعم</h2>
+        <p className="muted">
+          الحذف يلغي الوصول لهذا المطعم ويحفظ السجل، ويلغي المهام المفتوحة لإعادة إسنادها يدويًا.
+        </p>
         {data.members.map((m) => (
           <div className="member-row" key={m.id}>
-            <strong>{m.name}</strong>
+            <div className="account-identity">
+              <strong>{m.name}</strong>
+              <span dir="ltr">{m.email}</span>
+            </div>
             <span className="badge">{roleNames[m.role]}</span>
+            <button
+              className="secondary"
+              disabled={busy || m.id === currentUserId}
+              onClick={() => {
+                if (
+                  window.confirm(
+                    `حذف حساب ${m.name} من المطعم؟ سيُحفظ السجل وتُلغى مهامه المفتوحة لإعادة إسنادها يدويًا.`,
+                  )
+                )
+                  void deleteUser(m.id);
+              }}
+            >
+              {m.id === currentUserId ? 'حسابك الحالي محمي' : `حذف حساب ${m.name}`}
+            </button>
           </div>
         ))}
       </section>

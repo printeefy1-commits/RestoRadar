@@ -111,6 +111,158 @@ afterAll(async () => {
 });
 
 describe('real PostgreSQL and authenticated API', () => {
+  it.each(['ASSIGNED', 'ACCEPTED'] as const)(
+    'removes a waiter with a %s task atomically, protects self, and preserves history and other memberships',
+    async (status) => {
+      await command({ type: 'policy.configure', policy });
+      const seated = await seat();
+      await command({
+        type: 'task.assign',
+        kind: 'CUSTOMER_RECEPTION',
+        sourceId: seated.sessions[0].id,
+        waiterId: identities.waiter.id,
+        expectedVersion: 0,
+      });
+      if (status === 'ACCEPTED') {
+        const task = (await snapshot()).tasks[0];
+        expect(
+          (
+            await command(
+              { type: 'task.accept', taskId: task.id, expectedVersion: task.version },
+              'waiter',
+            )
+          ).statusCode,
+        ).toBe(200);
+      }
+      await repository.update(restaurantId, (s) =>
+        processDeadlines(s, new Date(Date.now() + 100000).toISOString()),
+      );
+      const before = await snapshot();
+      expect(
+        before.alerts.some((a) => a.sourceId === before.attempts[0].id && a.status === 'PENDING'),
+      ).toBe(true);
+      const remove = (userId: string, who = 'owner', id = restaurantId) =>
+        app.inject({
+          method: 'DELETE',
+          url: `/api/restaurants/${id}/users/${userId}`,
+          headers: { cookie: identities[who].cookie },
+          payload: {},
+        });
+      for (const who of ['manager', 'waiter'])
+        expect((await remove(identities.waiter2.id, who)).statusCode).toBe(403);
+      expect((await remove(identities.owner.id)).statusCode).toBe(409);
+      const otherRestaurant = randomUUID();
+      await pool.query('INSERT INTO restaurants(id,name) VALUES($1,$2)', [
+        otherRestaurant,
+        'Other',
+      ]);
+      await pool.query("INSERT INTO memberships VALUES($1,$2,'WAITER')", [
+        otherRestaurant,
+        identities.waiter.id,
+      ]);
+      expect((await remove(identities.waiter.id, 'owner', otherRestaurant)).statusCode).toBe(403);
+      expect((await remove(identities.waiter.id)).statusCode).toBe(200);
+      expect((await getDashboard('waiter')).statusCode).toBe(403);
+      expect((await getDashboard('waiter', otherRestaurant)).statusCode).toBe(200);
+      expect((await remove(identities.waiter.id)).statusCode).toBe(404);
+      const after = await snapshot();
+      expect(after.members.map((m) => m.id)).not.toContain(identities.waiter.id);
+      expect(after.tasks).toEqual(
+        before.tasks.map((t) => ({
+          ...t,
+          status: 'CANCELLED',
+          cancelledReason: 'USER_DELETED',
+          version: t.version + 1,
+        })),
+      );
+      expect(after.attempts).toEqual(before.attempts.map((a) => ({ ...a, status: 'CANCELLED' })));
+      expect(after.alerts.filter((a) => a.sourceId === before.attempts[0].id)).toEqual(
+        before.alerts
+          .filter((a) => a.sourceId === before.attempts[0].id)
+          .map((a) => ({ ...a, status: 'OBSOLETE', obsoleteReason: 'USER_DELETED' })),
+      );
+      expect(after.alerts.filter((a) => a.sourceId !== before.attempts[0].id)).toEqual(
+        before.alerts.filter((a) => a.sourceId !== before.attempts[0].id),
+      );
+      const stored = await repository.read(restaurantId);
+      expect(stored.events.find((e) => e.type === 'task.cancelled')).toMatchObject({
+        data: { taskId: before.tasks[0].id, reason: 'USER_DELETED' },
+      });
+      expect(processDeadlines(stored, new Date(Date.now() + 200000).toISOString())).toEqual(stored);
+      expect(after.sessions).toEqual(before.sessions);
+      for (const entry of before.audit) expect(after.audit).toContainEqual(entry);
+      expect(after.audit.find((a) => a.action === 'user.deleted')).toMatchObject({
+        actorId: identities.owner.id,
+        context: { userId: identities.waiter.id, name: 'waiter', role: 'WAITER' },
+      });
+      expect(
+        (await pool.query('SELECT id FROM users WHERE id=$1', [identities.waiter.id])).rowCount,
+      ).toBe(1);
+      expect(
+        (
+          await command(
+            {
+              type: 'task.accept',
+              taskId: after.tasks[0].id,
+              expectedVersion: after.tasks[0].version,
+            },
+            'waiter',
+          )
+        ).statusCode,
+      ).toBe(403);
+      expect(
+        (
+          await command({
+            type: 'task.assign',
+            kind: 'CUSTOMER_RECEPTION',
+            sourceId: seated.sessions[0].id,
+            waiterId: identities.waiter.id,
+            expectedVersion: after.tasks[0].version,
+          })
+        ).statusCode,
+      ).toBe(400);
+      expect(
+        (
+          await command({
+            type: 'task.assign',
+            kind: 'CUSTOMER_RECEPTION',
+            sourceId: seated.sessions[0].id,
+            waiterId: identities.waiter2.id,
+            expectedVersion: after.tasks[0].version,
+          })
+        ).statusCode,
+      ).toBe(200);
+      const reassigned = await snapshot();
+      expect(reassigned.tasks[0]).toMatchObject({
+        id: before.tasks[0].id,
+        status: 'ASSIGNED',
+        cancelledReason: null,
+      });
+      expect(reassigned.attempts.find((a) => a.id === before.attempts[0].id)?.status).toBe(
+        'CANCELLED',
+      );
+      expect(
+        reassigned.attempts.find((a) => a.id === reassigned.tasks[0].currentAttemptId)?.waiterId,
+      ).toBe(identities.waiter2.id);
+    },
+  );
+
+  it('lists every role and email only for the owner, without password fields', async () => {
+    const ownerView = await snapshot();
+    expect(ownerView.members).toHaveLength(Object.keys(identities).length);
+    for (const [name, user] of Object.entries(identities)) {
+      expect(ownerView.members.find((m) => m.id === user.id)).toEqual({
+        id: user.id,
+        name,
+        email: `${name}@test.invalid`,
+        role: name === 'owner' ? 'OWNER' : name.startsWith('manager') ? 'MANAGER' : 'WAITER',
+      });
+    }
+    for (const who of ['manager', 'waiter'])
+      for (const member of (await snapshot(who)).members)
+        expect(member).not.toHaveProperty('email');
+  });
+
   it('shuts down the real server gracefully, releasing its worker before closing the database pool', async () => {
     const url = new URL(process.env.TEST_DATABASE_URL!);
     url.searchParams.set('options', `-c search_path=${schema},public`);

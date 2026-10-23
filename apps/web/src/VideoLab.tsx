@@ -100,7 +100,6 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
   }, [base, job?.id, job?.status]);
 
   const report = job?.report?.sourceId === status?.source?.id ? job?.report : undefined;
-  const reportRegions = report?.regions ?? [];
   const sample = report?.samples.find((s) => Math.abs(s.seconds - seconds) < 0.26);
   useEffect(() => {
     const element = canvas.current;
@@ -111,8 +110,7 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
     context.clearRect(0, 0, w, h);
     context.font = `${Math.max(14, w / 70)}px sans-serif`;
     context.lineWidth = Math.max(2, w / 500);
-    const displayed = regions.length ? regions : reportRegions;
-    for (const region of displayed) {
+    for (const region of regions) {
       context.strokeStyle = '#4285ff';
       context.fillStyle = '#4285ff22';
       context.fillRect(region.x * w, region.y * h, region.width * w, region.height * h);
@@ -140,7 +138,7 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
         Math.max(18, y1 * h - 5),
       );
     }
-  }, [regions, reportRegions, sample, draft, tables]);
+  }, [regions, sample, draft, tables]);
 
   function seek(value: number) {
     if (video.current) video.current.currentTime = value;

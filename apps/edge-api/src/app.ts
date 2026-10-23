@@ -13,6 +13,7 @@ import {
   executeCommand,
   markMonitoringGap,
   processDeadlines,
+  removeMember,
 } from '@restoradar/domain';
 import { Repository, type Client, type DatabasePool } from '@restoradar/database';
 import { hashPassword, hashToken, newToken, verifyPassword } from './auth.ts';
@@ -86,6 +87,7 @@ export function dashboard(
     s.cleaningCycles = s.cleaningCycles.map((c) => ({ ...c, readyBy: null }));
     members = members.filter((m) => m.id === userId);
   }
+  if (role !== 'OWNER') members = members.map(({ email: _, ...member }) => member);
   s.alerts.sort(
     (a, b) => alertOrder[a.kind] - alertOrder[b.kind] || a.createdAt.localeCompare(b.createdAt),
   );
@@ -180,10 +182,18 @@ export async function buildApp(pool: DatabasePool, options: AppOptions = {}) {
   }
   async function members(restaurantId: string): Promise<Member[]> {
     const result = await pool.query(
-      'SELECT u.id,u.name,m.role FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.restaurant_id=$1 ORDER BY u.name',
+      'SELECT u.id,u.name,u.email,m.role FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.restaurant_id=$1 ORDER BY u.name,u.id',
       [restaurantId],
     );
     return result.rows;
+  }
+  async function memberRole(c: Client, restaurantId: string, userId: string): Promise<Role> {
+    const result = await c.query(
+      'SELECT role FROM memberships WHERE restaurant_id=$1 AND user_id=$2',
+      [restaurantId, userId],
+    );
+    if (!result.rowCount) throw new DomainError('FORBIDDEN', 'لا تملك صلاحية لهذا المطعم', 403);
+    return result.rows[0].role;
   }
   app.get('/api/health', async () => {
     await pool.query('SELECT 1');
@@ -265,12 +275,14 @@ export async function buildApp(pool: DatabasePool, options: AppOptions = {}) {
       return repository.update(
         restaurantId,
         async (s, c) => {
+          // Serialize authorization with membership removal under the restaurant lock.
+          const role = await memberRole(c, restaurantId, actor.id);
           const waiters = await c.query(
             "SELECT user_id FROM memberships WHERE restaurant_id=$1 AND role='WAITER'",
             [restaurantId],
           );
           return executeCommand(s, command, {
-            actor,
+            actor: { ...actor, role },
             waiterIds: waiters.rows.map((r) => r.user_id),
             now: new Date().toISOString(),
             simulatorEnabled,
@@ -291,6 +303,8 @@ export async function buildApp(pool: DatabasePool, options: AppOptions = {}) {
         id = randomUUID();
       const passwordHash = await hashPassword(body.password);
       await repository.update(restaurantId, async (previous, c) => {
+        if ((await memberRole(c, restaurantId, actor.id)) !== 'OWNER')
+          throw new DomainError('FORBIDDEN', 'إدارة الحسابات للمالك فقط', 403);
         await c.query('INSERT INTO users(id,email,name,password_hash) VALUES($1,$2,$3,$4)', [
           id,
           body.email,
@@ -314,6 +328,36 @@ export async function buildApp(pool: DatabasePool, options: AppOptions = {}) {
         return next;
       });
       return { id, name: body.name, role: body.role };
+    },
+  );
+  app.delete<{ Params: { restaurantId: string; userId: string } }>(
+    '/api/restaurants/:restaurantId/users/:userId',
+    async (request) => {
+      const restaurantId = uuid.parse(request.params.restaurantId);
+      const userId = uuid.parse(request.params.userId);
+      const actor = await authorize(request, restaurantId);
+      if (actor.role !== 'OWNER')
+        throw new DomainError('FORBIDDEN', 'إدارة الحسابات للمالك فقط', 403);
+      if (actor.id === userId)
+        throw new DomainError('CURRENT_OWNER', 'لا يمكن حذف حساب المالك الحالي', 409);
+      await repository.update(restaurantId, async (previous, c) => {
+        // Recheck under the restaurant lock: another owner may have removed this actor.
+        if ((await memberRole(c, restaurantId, actor.id)) !== 'OWNER')
+          throw new DomainError('FORBIDDEN', 'إدارة الحسابات للمالك فقط', 403);
+        const target = await c.query(
+          'SELECT u.id,u.name,m.role FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.restaurant_id=$1 AND m.user_id=$2',
+          [restaurantId, userId],
+        );
+        if (!target.rowCount)
+          throw new DomainError('NOT_FOUND', 'الحساب غير موجود في هذا المطعم', 404);
+        // Remove restaurant access only; retain identity and all operational history.
+        await c.query('DELETE FROM memberships WHERE restaurant_id=$1 AND user_id=$2', [
+          restaurantId,
+          userId,
+        ]);
+        return removeMember(previous, target.rows[0], actor, new Date().toISOString());
+      });
+      return { ok: true };
     },
   );
   await registerVideoLab(

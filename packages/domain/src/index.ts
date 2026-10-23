@@ -4,6 +4,7 @@ import type {
   Alert,
   AlertKind,
   Command,
+  Member,
   Occupancy,
   RestaurantState,
   Table,
@@ -117,6 +118,32 @@ function cancelTasks(
     );
     emit(s, 'task.cancelled', at, { taskId: t.id, reason });
   }
+}
+
+export function removeMember(
+  previous: RestaurantState,
+  member: Member,
+  actor: Actor,
+  at: string,
+): RestaurantState {
+  ensure(actor.role === 'OWNER', 'FORBIDDEN', 'إدارة الحسابات للمالك فقط', 403);
+  ensure(actor.id !== member.id, 'CURRENT_OWNER', 'لا يمكن حذف حساب المالك الحالي');
+  const s = structuredClone(previous);
+  const cancelledTaskIds: string[] = [];
+  for (const task of s.tasks) {
+    const attempt = find(s.attempts, task.currentAttemptId);
+    if (attempt.waiterId !== member.id || !['ASSIGNED', 'ACCEPTED'].includes(task.status)) continue;
+    cancelTasks(s, task.kind, task.sourceId, 'USER_DELETED', at);
+    cancelledTaskIds.push(task.id);
+  }
+  audit(s, actor.id, 'user.deleted', at, {
+    userId: member.id,
+    name: member.name,
+    role: member.role,
+    cancelledTaskIds,
+  });
+  s.version++;
+  return s;
 }
 function changeOccupancy(
   s: RestaurantState,
