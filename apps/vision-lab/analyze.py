@@ -25,6 +25,7 @@ from focused_detection import (
     MAX_FOCUS_TABLES,
     detect_with_seat_focus,
 )
+from wrist_trial import WRIST_POLICY, WristTrial, wrist_observation
 
 
 class CpuPose(RTMPose):
@@ -157,6 +158,8 @@ def analyze(source, config, output, progress):
         raise ValueError("Video cannot be decoded")
     table_ids = {r["tableId"] for r in config["regions"]}
     verifier = SeatingVerifier(table_ids)
+    wrist_enabled = config.get("wristTrial", False)
+    wrist_verifier = WristTrial(table_ids) if wrist_enabled else None
     samples, events = [], []
     first = config["startSeconds"]
     end = first + config["durationSeconds"]
@@ -257,6 +260,33 @@ def analyze(source, config, output, progress):
                                 ],
                             }
                         )
+                        if wrist_enabled:
+                            person = people[-1]
+                            person["wristEvidence"] = wrist_observation(
+                                points[i],
+                                scores[i],
+                                box,
+                                person["trackId"],
+                                score,
+                                config["regions"],
+                                config["tabletopRegions"],
+                                w,
+                                h,
+                            )
+                            person["posePoints"].extend(
+                                {
+                                    "part": part,
+                                    "point": [
+                                        float(points[i][index][0] / w),
+                                        float(points[i][index][1] / h),
+                                    ],
+                                    "score": float(scores[i][index]),
+                                }
+                                for index, part in (
+                                    (9, "LEFT_WRIST"),
+                                    (10, "RIGHT_WRIST"),
+                                )
+                            )
             states, confirmed = verifier.observe(seconds, occupied)
             events.extend(confirmed)
             samples.append(
@@ -268,6 +298,8 @@ def analyze(source, config, output, progress):
                     "tables": states,
                 }
             )
+            if wrist_verifier:
+                samples[-1]["wristTables"] = wrist_verifier.observe(seconds, people)
             atomic_json(
                 progress,
                 {
@@ -312,6 +344,12 @@ def analyze(source, config, output, progress):
     }
     if detection_mode == "SEAT_FOCUS":
         report["focusMergePolicy"] = FOCUS_MERGE_POLICY
+    if wrist_enabled:
+        report.update(
+            wristTrial=True,
+            tabletopRegions=config["tabletopRegions"],
+            wristPolicy=WRIST_POLICY,
+        )
     atomic_json(output, report)
 
 

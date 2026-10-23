@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SeatRegion, Table, TrialJob, VideoLabStatus } from '@restoradar/contracts';
 import { seatRegionSchema } from '@restoradar/contracts';
-import { evidenceLabels, trialEvidence } from './video-evidence.ts';
+import { evidenceLabels, trialEvidence, wristReasonLabels } from './video-evidence.ts';
 
 async function request<T>(url: string, body?: unknown): Promise<T> {
   const response = await fetch(url, {
@@ -31,6 +31,9 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
   const [status, setStatus] = useState<VideoLabStatus | null>(null);
   const [error, setError] = useState('');
   const [regions, setRegions] = useState<SeatRegion[]>([]);
+  const [tabletopRegions, setTabletopRegions] = useState<SeatRegion[]>([]);
+  const [wristTrial, setWristTrial] = useState(false);
+  const [regionKind, setRegionKind] = useState<'SEAT' | 'TABLETOP'>('SEAT');
   const [tableId, setTableId] = useState(tables[0]?.id ?? '');
   const [job, setJob] = useState<TrialJob | null>(null);
   const [busy, setBusy] = useState(false);
@@ -49,12 +52,21 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
   const sourceId = useRef<string | null>(null);
   const validTables = new Set(tables.map((t) => t.id));
   const running = busy || job?.status === 'RUNNING';
+  const tabletopDrawing = wristTrial && regionKind === 'TABLETOP';
+  const drawingRegions = tabletopDrawing ? tabletopRegions : regions;
+  const appendRegion = (region: SeatRegion) => {
+    if (tabletopDrawing) setTabletopRegions((old) => [...old, region]);
+    else setRegions((old) => [...old, region]);
+  };
   const tableName = (id: string) => tables.find((t) => t.id === id)?.name ?? 'طاولة محذوفة';
 
   const loadStatus = useCallback(async () => {
     const next = await request<VideoLabStatus>(base);
     if (sourceId.current && sourceId.current !== next.source?.id) {
       setRegions([]);
+      setTabletopRegions([]);
+      setDraft(null);
+      setDrawing(false);
       setJob(null);
       setError('تغير ملف الفيديو. أعد تحديد مناطق المقاعد.');
     }
@@ -123,6 +135,19 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
       context.fillStyle = '#ffffff';
       context.fillText(tableName(region.tableId), region.x * w, Math.max(18, region.y * h - 5));
     }
+    if (wristTrial)
+      for (const region of tabletopRegions) {
+        context.strokeStyle = '#a78bfa';
+        context.fillStyle = '#a78bfa22';
+        context.fillRect(region.x * w, region.y * h, region.width * w, region.height * h);
+        context.strokeRect(region.x * w, region.y * h, region.width * w, region.height * h);
+        context.fillStyle = '#ffffff';
+        context.fillText(
+          `${tableName(region.tableId)} · سطح الطاولة`,
+          region.x * w,
+          Math.max(18, region.y * h - 5),
+        );
+      }
     if (draft) {
       context.strokeStyle = '#ffffff';
       context.strokeRect(
@@ -143,8 +168,30 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
         x1 * w,
         Math.max(18, y1 * h - 5),
       );
+      if (wristTrial && report?.wristTrial)
+        for (const point of person.posePoints ?? []) {
+          if (
+            !['LEFT_WRIST', 'RIGHT_WRIST'].includes(point.part) ||
+            point.score < (report.wristPolicy?.minKeypointScore ?? 0.4)
+          )
+            continue;
+          context.fillStyle = '#a78bfa';
+          context.beginPath();
+          context.arc(point.point[0] * w, point.point[1] * h, Math.max(3, w / 250), 0, Math.PI * 2);
+          context.fill();
+        }
     }
-  }, [regions, sample, draft, tables, minDetectionScore]);
+  }, [
+    regions,
+    tabletopRegions,
+    wristTrial,
+    report?.wristTrial,
+    report?.wristPolicy,
+    sample,
+    draft,
+    tables,
+    minDetectionScore,
+  ]);
 
   function seek(value: number) {
     if (video.current) video.current.currentTime = value;
@@ -181,6 +228,7 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
           durationSeconds,
           detectionMode,
           poseModel,
+          ...(wristTrial ? { wristTrial: true, tabletopRegions } : {}),
           regions,
         }),
       );
@@ -265,7 +313,11 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                     ref={canvas}
                     width={status.source.width}
                     height={status.source.height}
-                    aria-label="رسم منطقة المقعد على الفيديو"
+                    aria-label={
+                      tabletopDrawing
+                        ? 'رسم منطقة سطح الطاولة على الفيديو'
+                        : 'رسم منطقة المقعد على الفيديو'
+                    }
                     className={drawing ? 'seat-canvas drawing' : 'seat-canvas'}
                     onPointerDown={(event) => {
                       if (!drawing || !tableId || running) return;
@@ -292,8 +344,7 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                         width: Math.abs(p.x - draft.x),
                         height: Math.abs(p.y - draft.y),
                       };
-                      if (region.width >= 0.01 && region.height >= 0.01)
-                        setRegions((old) => [...old, region]);
+                      if (region.width >= 0.01 && region.height >= 0.01) appendRegion(region);
                       setDraft(null);
                       setDrawing(false);
                     }}
@@ -353,14 +404,29 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                           .min(1)
                           .max(40)
                           .safeParse(previous.regions);
+                        const restoredTops = seatRegionSchema
+                          .array()
+                          .max(40)
+                          .safeParse(previous.tabletopRegions ?? []);
                         if (
                           !restored.success ||
-                          new Set(restored.data.map((r) => r.id)).size !== restored.data.length
+                          !restoredTops.success ||
+                          new Set([...restored.data, ...restoredTops.data].map((r) => r.id))
+                            .size !==
+                            restored.data.length + restoredTops.data.length
                         )
                           throw new Error('مناطق التقرير غير صالحة');
-                        if (restored.data.some((r) => !validTables.has(r.tableId)))
+                        if (
+                          [...restored.data, ...restoredTops.data].some(
+                            (r) => !validTables.has(r.tableId),
+                          ) ||
+                          restoredTops.data.some(
+                            (r) => !restored.data.some((seat) => seat.tableId === r.tableId),
+                          )
+                        )
                           throw new Error('بعض طاولات التقرير غير موجودة في هذا المطعم');
                         setRegions(restored.data);
+                        setTabletopRegions(restoredTops.data);
                         setDraft(null);
                         setDrawing(false);
                         setError('');
@@ -378,9 +444,48 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                   استورد المناطق نفسها للمقارنة بعد التحديث. يستورد هذا الخيار مناطق المقاعد فقط.
                 </p>
                 <p className="muted">
-                  أوقف الفيديو عند ظهور ضيف جالس. اختر الطاولة وارسم مستطيلًا حول موضع حوضه المتوقع
-                  على المقعد، لا حول سطح الطاولة. أضف منطقة لكل مقعد ظاهر.
+                  {tabletopDrawing
+                    ? 'اختر الطاولة وارسم مستطيلًا حول سطحها الذي قد تظهر فوقه المعاصم.'
+                    : 'أوقف الفيديو عند ظهور ضيف جالس. اختر الطاولة وارسم مستطيلًا حول موضع حوضه المتوقع على المقعد، لا حول سطح الطاولة. أضف منطقة لكل مقعد ظاهر.'}
                 </p>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={wristTrial}
+                    disabled={running}
+                    onChange={(event) => {
+                      setWristTrial(event.target.checked);
+                      setRegionKind('SEAT');
+                      setDrawing(false);
+                      setDraft(null);
+                    }}
+                  />
+                  تجربة إشارة المعصمين
+                </label>
+                {wristTrial && (
+                  <>
+                    <p className="muted">
+                      ارسم موضع كل مقعد بالأزرق، وسطح الطاولة بالبنفسجي. نبحث عن معصم داخل سطح
+                      الطاولة وجسم ثابت قرب المقعد لخمس ثوانٍ. النتيجة إشغال مرجّح؛ لا تثبت ملامسة
+                      الطاولة أو الجلوس، وقد تشمل واقفًا محجوبًا.
+                    </p>
+                    <label>
+                      نوع المنطقة
+                      <select
+                        value={regionKind}
+                        disabled={running}
+                        onChange={(event) => {
+                          setRegionKind(event.target.value as typeof regionKind);
+                          setDrawing(false);
+                          setDraft(null);
+                        }}
+                      >
+                        <option value="SEAT">موضع المقعد</option>
+                        <option value="TABLETOP">سطح الطاولة للمعصمين</option>
+                      </select>
+                    </label>
+                  </>
+                )}
                 {!tables.length ? (
                   <p>أضف طاولة من الإعدادات أولًا.</p>
                 ) : (
@@ -401,13 +506,17 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                     </label>
                     <button
                       className="secondary"
-                      disabled={running || !tableId || regions.length >= 40}
+                      disabled={running || !tableId || drawingRegions.length >= 40}
                       onClick={() => {
                         video.current?.pause();
                         setDrawing(!drawing);
                       }}
                     >
-                      {drawing ? 'إلغاء الرسم' : 'رسم منطقة مقعد'}
+                      {drawing
+                        ? 'إلغاء الرسم'
+                        : tabletopDrawing
+                          ? 'رسم سطح الطاولة'
+                          : 'رسم منطقة مقعد'}
                     </button>
                     <details>
                       <summary>إضافة منطقة بالأرقام بدل الرسم</summary>
@@ -423,10 +532,7 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                             setError('يجب أن تبقى المنطقة داخل حدود الصورة');
                             return;
                           }
-                          setRegions((old) => [
-                            ...old,
-                            { id: crypto.randomUUID(), tableId, x, y, width, height },
-                          ]);
+                          appendRegion({ id: crypto.randomUUID(), tableId, x, y, width, height });
                         }}
                       >
                         <p className="muted">النسب من الحافة اليسرى والعليا للصورة.</p>
@@ -450,7 +556,7 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                             />
                           </label>
                         ))}
-                        <button disabled={running || !tableId || regions.length >= 40}>
+                        <button disabled={running || !tableId || drawingRegions.length >= 40}>
                           إضافة المنطقة
                         </button>
                       </form>
@@ -470,15 +576,40 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                     </button>
                   </div>
                 ))}
-                {report && !regions.length && (
-                  <button
-                    onClick={() =>
-                      setRegions(report.regions.filter((r) => validTables.has(r.tableId)))
-                    }
-                  >
-                    استخدام مناطق التقرير السابق
-                  </button>
-                )}
+                {wristTrial &&
+                  tabletopRegions.map((r, i) => (
+                    <div className="member-row" key={r.id}>
+                      <span>
+                        {tableName(r.tableId)} · سطح الطاولة {i + 1}
+                      </span>
+                      <button
+                        disabled={running}
+                        onClick={() =>
+                          setTabletopRegions((old) => old.filter((v) => v.id !== r.id))
+                        }
+                      >
+                        حذف سطح الطاولة {i + 1}
+                      </button>
+                    </div>
+                  ))}
+                {report &&
+                  (!regions.length ||
+                    (wristTrial &&
+                      !tabletopRegions.length &&
+                      !!report.tabletopRegions?.length)) && (
+                    <button
+                      onClick={() => {
+                        setRegions(report.regions.filter((r) => validTables.has(r.tableId)));
+                        setTabletopRegions(
+                          (report.tabletopRegions ?? []).filter((r) => validTables.has(r.tableId)),
+                        );
+                        setDrawing(false);
+                        setDraft(null);
+                      }}
+                    >
+                      استخدام مناطق التقرير السابق
+                    </button>
+                  )}
                 <small className="muted">
                   مناطق التجربة لا تفعّل مراقبة الطاولات. احتفظ بالتقرير قبل مغادرة الصفحة؛ النتائج
                   مؤقتة لمدة ساعة وتُفقد عند إعادة تشغيل الخدمة.
@@ -556,6 +687,13 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                     status.models !== 'READY' ||
                     !regions.length ||
                     regions.some((r) => !validTables.has(r.tableId)) ||
+                    (wristTrial &&
+                      (!tabletopRegions.length ||
+                        tabletopRegions.some(
+                          (r) =>
+                            !validTables.has(r.tableId) ||
+                            !regions.some((seat) => seat.tableId === r.tableId),
+                        ))) ||
                     (detectionMode === 'SEAT_FOCUS' &&
                       new Set(regions.map((r) => r.tableId)).size > 4) ||
                     durationSeconds < 6 ||
@@ -584,6 +722,12 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                 {report && (
                   <>
                     <h3>نتيجة التجربة</h3>
+                    {report.wristTrial && (
+                      <p>
+                        تجربة المعصمين مفعّلة في هذا التقرير. الإشغال المرجّح منفصل عن تأكيدات
+                        الجلوس.
+                      </p>
+                    )}
                     <p>
                       طريقة الرصد في التقرير:{' '}
                       {report.detectionMode === 'SEAT_FOCUS'
@@ -655,6 +799,40 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                             </p>
                           ))}
                         </details>
+                        {report.wristTrial && (
+                          <section aria-label="إشارة المعصمين التجريبية">
+                            <p>
+                              إشغال مرجّح بإشارة المعصمين:{' '}
+                              {
+                                sample.people.filter((p) => p.wristEvidence?.state === 'PROBABLE')
+                                  .length
+                              }{' '}
+                              · ليس عدد جلوس مؤكدًا.
+                            </p>
+                            {sample.people.map(
+                              (person, index) =>
+                                person.wristEvidence && (
+                                  <p key={`${person.trackId}-${index}`}>
+                                    #{person.trackId ?? '?'} ·{' '}
+                                    {wristReasonLabels[person.wristEvidence.reason]}
+                                    {person.wristEvidence.tableId &&
+                                      ` · ${tableName(person.wristEvidence.tableId)}`}{' '}
+                                    · ثبات {person.wristEvidence.stableSeconds.toFixed(1)} ثانية
+                                    {person.wristEvidence.anchorSource === 'BOX_CENTER' &&
+                                      ' · موضع الجسم من مركز الصندوق بسبب ضعف الحوض'}
+                                  </p>
+                                ),
+                            )}
+                            {Object.entries(sample.wristTables ?? {}).map(([id, state]) => (
+                              <p key={id}>
+                                {tableName(id)} ·{' '}
+                                {state === 'PROBABLE'
+                                  ? 'إشغال مرجّح فقط'
+                                  : 'إشارة المعصمين غير محسومة'}
+                              </p>
+                            ))}
+                          </section>
+                        )}
                       </section>
                     )}
                     <details>

@@ -357,6 +357,15 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
         departureEvaluated: false,
         detectionMode: submitted!.detectionMode,
         poseModel: submitted!.poseModel,
+        wristTrial: submitted!.wristTrial,
+        tabletopRegions: submitted!.tabletopRegions,
+        wristPolicy: {
+          version: 'WRIST_SEAT_DWELL_V1',
+          seconds: 5,
+          minKeypointScore: 0.4,
+          maxDriftBoxWidths: 0.25,
+          maxDriftBoxHeights: 0.15,
+        },
         regions: submitted!.regions,
         events: [
           {
@@ -402,6 +411,31 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
             ],
             tables: { [submitted!.regions[0].tableId]: 'UNKNOWN' },
           },
+          {
+            seconds: 6,
+            people: [
+              {
+                box: [0.1, 0.1, 0.4, 0.8],
+                trackId: 77,
+                posture: 'UNCERTAIN',
+                tableId: null,
+                score: 0.9,
+                evidence: 'POSE_UNCERTAIN',
+                wristEvidence: {
+                  state: 'PROBABLE',
+                  reason: 'PROBABLE',
+                  stableSeconds: 5,
+                  tableId: submitted!.regions[0].tableId,
+                  seatRegionId: submitted!.regions[0].id,
+                  bodyAnchor: [0.2, 0.3],
+                  anchorSource: 'BOX_CENTER',
+                },
+                posePoints: [{ part: 'LEFT_WRIST', point: [0.55, 0.35], score: 0.9 }],
+              },
+            ],
+            tables: { [submitted!.regions[0].tableId]: 'UNKNOWN' },
+            wristTables: { [submitted!.regions[0].tableId]: 'PROBABLE' },
+          },
         ],
       };
       return route.fulfill({ json: { id: jobId, status: 'COMPLETED', progress: 1, report } });
@@ -434,6 +468,20 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
   await page.getByLabel('العرض %').fill('20');
   await page.getByLabel('الارتفاع %').fill('20');
   await page.getByRole('button', { name: 'إضافة المنطقة', exact: true }).click();
+  await expect(
+    page.getByRole('checkbox', { name: 'تجربة إشارة المعصمين', exact: true }),
+  ).not.toBeChecked();
+  await page.getByRole('checkbox', { name: 'تجربة إشارة المعصمين', exact: true }).check();
+  await expect(
+    page.getByRole('button', { name: 'تحليل الفيديو على CPU', exact: true }),
+  ).toBeDisabled();
+  await page.getByRole('combobox', { name: 'نوع المنطقة', exact: true }).selectOption('TABLETOP');
+  await page.getByLabel('البداية الأفقية %').fill('50');
+  await page.getByLabel('البداية الرأسية %').fill('30');
+  await page.getByLabel('العرض %').fill('40');
+  await page.getByLabel('الارتفاع %').fill('30');
+  await page.getByRole('button', { name: 'إضافة المنطقة', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'حذف سطح الطاولة 1', exact: true })).toBeVisible();
   await expect(page.getByLabel('طريقة رصد الأشخاص')).toHaveValue('FULL_FRAME');
   await expect(page.getByRole('combobox', { name: 'نموذج تقدير الجلوس', exact: true })).toHaveValue(
     'RTMPOSE_TINY',
@@ -450,6 +498,13 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
   await expect(page.getByRole('heading', { name: 'نتيجة التجربة', exact: true })).toBeVisible();
   expect(submitted?.detectionMode).toBe('SEAT_FOCUS');
   expect(submitted?.poseModel).toBe('RTMPOSE_MEDIUM');
+  expect(submitted?.wristTrial).toBe(true);
+  expect(submitted?.tabletopRegions?.[0]).toMatchObject({
+    x: 0.5,
+    y: 0.3,
+    width: 0.4,
+    height: 0.3,
+  });
   await expect(
     page.getByText('طريقة الرصد في التقرير: الصورة ومناطق المقاعد', { exact: true }),
   ).toBeVisible();
@@ -474,15 +529,28 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
   await diagnostics.getByText('أسباب قبول الرصد واستبعاده', { exact: true }).click();
   await expect(diagnostics.getByText(/#39 · جلوس مستبعد: رصد ضعيف/)).toBeVisible();
   // Inspect the actual canvas: blue seat pixels must disappear even with a retained report.
-  const bluePixels = () =>
-    page.locator('canvas').evaluate((canvas: HTMLCanvasElement) => {
-      const pixels = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height).data;
-      let count = 0;
-      for (let i = 0; i < pixels.length; i += 4)
-        if (pixels[i] === 66 && pixels[i + 1] === 133 && pixels[i + 2] === 255 && pixels[i + 3] > 0)
-          count++;
-      return count;
-    });
+  const colorPixels = (red: number, green: number, blue: number) =>
+    page.locator('canvas').evaluate(
+      (canvas: HTMLCanvasElement, rgb: number[]) => {
+        const pixels = canvas
+          .getContext('2d')!
+          .getImageData(0, 0, canvas.width, canvas.height).data;
+        let count = 0;
+        for (let i = 0; i < pixels.length; i += 4)
+          if (
+            pixels[i] === rgb[0] &&
+            pixels[i + 1] === rgb[1] &&
+            pixels[i + 2] === rgb[2] &&
+            pixels[i + 3] > 0
+          )
+            count++;
+        return count;
+      },
+      [red, green, blue],
+    );
+  const bluePixels = () => colorPixels(66, 133, 255);
+  const purplePixels = () => colorPixels(167, 139, 250);
+  const greenPixels = () => colorPixels(35, 211, 152);
   await expect.poll(bluePixels).toBeGreaterThan(0);
   await page.getByRole('button', { name: 'حذف المنطقة 1', exact: true }).click();
   await expect.poll(bluePixels).toBe(0);
@@ -494,25 +562,21 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
   );
   await expect(diagnostics).toContainText('صناديق الأشخاص قبل التتبع: 6');
   await expect(diagnostics.getByText(/الإشغال غير محسوم في هذه العينة/)).toBeVisible();
-  await expect
-    .poll(() =>
-      page.locator('canvas').evaluate((canvas: HTMLCanvasElement) => {
-        const pixels = canvas
-          .getContext('2d')!
-          .getImageData(0, 0, canvas.width, canvas.height).data;
-        let green = 0;
-        for (let i = 0; i < pixels.length; i += 4)
-          if (
-            pixels[i] === 35 &&
-            pixels[i + 1] === 211 &&
-            pixels[i + 2] === 152 &&
-            pixels[i + 3] > 0
-          )
-            green++;
-        return green;
-      }),
-    )
-    .toBe(0);
+  await expect.poll(greenPixels).toBe(0);
+  await expect.poll(purplePixels).toBeGreaterThan(0);
+  await page.getByRole('button', { name: 'حذف سطح الطاولة 1', exact: true }).click();
+  await expect.poll(purplePixels).toBe(0);
+  await page.locator('video').evaluate((element: HTMLVideoElement) => {
+    element.currentTime = 6;
+  });
+  const wristDiagnostics = page.getByRole('region', {
+    name: 'إشارة المعصمين التجريبية',
+    exact: true,
+  });
+  await expect(wristDiagnostics).toContainText('إشغال مرجّح بإشارة المعصمين: 1');
+  await expect(wristDiagnostics).toContainText('ليس تأكيد جلوس');
+  await expect(diagnostics).toContainText('أدلة مقبولة للتحقق: 0');
+  await expect.poll(greenPixels).toBe(0);
   await page.getByRole('button', { name: 'استخدام مناطق التقرير السابق', exact: true }).click();
   await expect.poll(bluePixels).toBeGreaterThan(0);
   await page.getByRole('button', { name: 'حذف المنطقة 1', exact: true }).click();
@@ -532,6 +596,19 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
   });
   await expect.poll(bluePixels).toBeGreaterThan(0);
   await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'حذف سطح الطاولة 1', exact: true })).toHaveCount(0);
+  await importReport.setInputFiles({
+    name: 'wrist-regions.json',
+    mimeType: 'application/json',
+    buffer: Buffer.from(
+      JSON.stringify({
+        sourceId,
+        regions: submitted!.regions,
+        tabletopRegions: submitted!.tabletopRegions,
+      }),
+    ),
+  });
+  await expect(page.getByRole('button', { name: 'حذف سطح الطاولة 1', exact: true })).toBeVisible();
   const downloadPromise = page.waitForEvent('download');
   await page.getByRole('button', { name: 'تنزيل تقرير التجربة JSON', exact: true }).click();
   expect((await downloadPromise).suggestedFilename()).toBe('restoradar-video-trial.json');

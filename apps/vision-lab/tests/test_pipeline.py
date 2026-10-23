@@ -121,6 +121,43 @@ class DecisionTests(unittest.TestCase):
 
 
 class FocusedDetectionTests(unittest.TestCase):
+    def test_wrist_trial_requires_valid_separate_tabletops_of_seated_tables(self):
+        seat = {
+            "id": str(uuid4()),
+            "tableId": str(uuid4()),
+            "x": 0.1,
+            "y": 0.2,
+            "width": 0.2,
+            "height": 0.2,
+        }
+        trial = {
+            "sourceId": "a" * 64,
+            "startSeconds": 0,
+            "durationSeconds": 10,
+            "regions": [seat],
+        }
+        top = {**seat, "id": str(uuid4())}
+        self.assertFalse(service.Trial(**trial).wristTrial)
+        self.assertTrue(
+            service.Trial(
+                **{**trial, "wristTrial": True, "tabletopRegions": [top]}
+            ).wristTrial
+        )
+        for extra in (
+            {"wristTrial": True},
+            {"wristTrial": "true", "tabletopRegions": [top]},
+            {"tabletopRegions": [top]},
+            {"wristTrial": True, "tabletopRegions": [seat]},
+            {"wristTrial": True, "tabletopRegions": [{**top, "tableId": str(uuid4())}]},
+            {"wristTrial": True, "tabletopRegions": [{**top, "x": 0.95}]},
+            {
+                "wristTrial": True,
+                "tabletopRegions": [{**top, "id": str(uuid4())} for _ in range(41)],
+            },
+        ):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                service.Trial(**{**trial, **extra})
+
     def test_crop_coordinates_and_duplicate_views_are_merged_before_tracking(self):
         frame = np.zeros((1000, 1000, 3), np.uint8)
         regions = [
@@ -472,6 +509,60 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(report["poseModel"], "RTMPOSE_TINY")
         self.assertEqual(len(report["events"]), 1)
 
+    def test_wrist_probability_never_promotes_uncertain_pose_or_changes_baseline(self):
+        # Hide only knees in a real ONNX graph: wrists and torso remain reliable.
+        path = self.model_dir / "pose.onnx"
+        graph = onnx.load(str(path))
+        for node in graph.graph.node:
+            for attr in node.attribute:
+                if attr.name == "value":
+                    array = numpy_helper.to_array(attr.t).copy()
+                    array[:, [13, 14], :] *= 0.1
+                    attr.t.CopyFrom(numpy_helper.from_array(array))
+        onnx.save(graph, str(path))
+        manifest_path = self.model_dir / "manifest.json"
+        record = json.loads(manifest_path.read_text())
+        record["pose"]["sha256"] = models.digest(path)
+        manifest_path.write_text(json.dumps(record))
+        baseline_path, wrist_path = (
+            self.root / "baseline.json",
+            self.root / "wrists.json",
+        )
+        analyze.analyze(
+            self.source, self.config, baseline_path, self.root / "progress.json"
+        )
+        config = {
+            **self.config,
+            "wristTrial": True,
+            "tabletopRegions": [{**self.config["regions"][0], "id": str(uuid4())}],
+        }
+        analyze.analyze(self.source, config, wrist_path, self.root / "progress.json")
+        baseline, report = json.loads(baseline_path.read_text()), json.loads(
+            wrist_path.read_text()
+        )
+        self.assertNotIn("wristTrial", baseline)
+        self.assertEqual(report["events"], [])
+        self.assertEqual(baseline["events"], [])
+        self.assertTrue(report["wristTrial"])
+        self.assertEqual(report["wristPolicy"]["version"], "WRIST_SEAT_DWELL_V1")
+        probable = [
+            s for s in report["samples"] if "PROBABLE" in s["wristTables"].values()
+        ]
+        self.assertTrue(probable)
+        self.assertEqual(probable[0]["seconds"], 5)
+        for sample, original in zip(report["samples"], baseline["samples"]):
+            self.assertEqual(sample["tables"], original["tables"])
+            self.assertEqual(set(sample["tables"].values()), {"UNKNOWN"})
+            for person in sample["people"]:
+                self.assertEqual(person["evidence"], "POSE_UNCERTAIN")
+                self.assertEqual(len(person["posePoints"]), 8)
+                person.pop("wristEvidence")
+                person["posePoints"] = [
+                    p for p in person["posePoints"] if "WRIST" not in p["part"]
+                ]
+            sample.pop("wristTables")
+            self.assertEqual(sample, original)
+
     def test_black_frames_stay_unknown_even_with_constant_detection_graph(self):
         source = self.root / "black.avi"
         writer = cv2.VideoWriter(
@@ -481,13 +572,23 @@ class RuntimeTests(unittest.TestCase):
             writer.write(np.zeros((240, 320, 3), np.uint8))
         writer.release()
         output = self.root / "result.json"
-        analyze.analyze(source, self.config, output, self.root / "progress.json")
+        config = {
+            **self.config,
+            "wristTrial": True,
+            "tabletopRegions": [{**self.config["regions"][0], "id": str(uuid4())}],
+        }
+        analyze.analyze(source, config, output, self.root / "progress.json")
         report = json.loads(output.read_text())
         self.assertEqual(report["events"], [])
         self.assertTrue(
             all(set(s["tables"].values()) == {"UNKNOWN"} for s in report["samples"])
         )
         self.assertTrue(all(s["detectedBoxes"] == 0 for s in report["samples"]))
+        self.assertTrue(
+            all(
+                set(s["wristTables"].values()) == {"UNKNOWN"} for s in report["samples"]
+            )
+        )
 
     def test_focused_mode_runs_real_onnx_crops_and_records_mode(self):
         config = {
@@ -598,7 +699,14 @@ class RuntimeTests(unittest.TestCase):
         with patch.object(service, "prepare_models"), TestClient(service.app) as client:
             response = client.post(
                 f"/restaurants/{tenant}/jobs",
-                json={**self.config, "poseModel": "RTMPOSE_MEDIUM"},
+                json={
+                    **self.config,
+                    "poseModel": "RTMPOSE_MEDIUM",
+                    "wristTrial": True,
+                    "tabletopRegions": [
+                        {**self.config["regions"][0], "id": str(uuid4())}
+                    ],
+                },
             )
             self.assertEqual(response.status_code, 202, response.text)
             job_id = response.json()["id"]
@@ -610,6 +718,13 @@ class RuntimeTests(unittest.TestCase):
                 time.sleep(0.1)
             self.assertEqual(job["status"], "COMPLETED", job)
             self.assertEqual(job["report"]["poseModel"], "RTMPOSE_MEDIUM")
+            self.assertTrue(job["report"]["wristTrial"])
+            self.assertTrue(
+                any(
+                    "PROBABLE" in s["wristTables"].values()
+                    for s in job["report"]["samples"]
+                )
+            )
             self.assertEqual(
                 job["report"]["models"]["artifacts"]["pose"], record["sha256"]
             )

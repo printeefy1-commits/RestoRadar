@@ -53,11 +53,23 @@ class Trial(BaseModel):
     regions: list[Region] = Field(min_length=1, max_length=40)
     detectionMode: Literal["FULL_FRAME", "SEAT_FOCUS"] = "FULL_FRAME"
     poseModel: Literal["RTMPOSE_TINY", "RTMPOSE_MEDIUM"] = "RTMPOSE_TINY"
+    wristTrial: bool = Field(default=False, strict=True)
+    tabletopRegions: list[Region] = Field(default_factory=list, max_length=40)
 
     @model_validator(mode="after")
     def unique_regions(self):
-        if len({r.id for r in self.regions}) != len(self.regions):
+        all_regions = self.regions + self.tabletopRegions
+        if len({r.id for r in all_regions}) != len(all_regions):
             raise ValueError("Repeated regions")
+        if self.wristTrial and not self.tabletopRegions:
+            raise ValueError("ارسم منطقة سطح الطاولة لتجربة المعصمين")
+        if not self.wristTrial and self.tabletopRegions:
+            raise ValueError("فعّل تجربة المعصمين لاستخدام مناطق سطح الطاولة")
+        if any(
+            r.tableId not in {s.tableId for s in self.regions}
+            for r in self.tabletopRegions
+        ):
+            raise ValueError("اربط سطح الطاولة بمنطقة مقعد للطاولة نفسها")
         if (
             self.detectionMode == "SEAT_FOCUS"
             and len({r.tableId for r in self.regions}) > MAX_FOCUS_TABLES

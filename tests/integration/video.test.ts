@@ -20,12 +20,17 @@ let pool: DatabasePool,
   app: Awaited<ReturnType<typeof buildApp>>,
   calls = 0;
 let storedJob: TrialJob | null = null;
+let lastStarted: unknown;
 const sourceId = 'a'.repeat(64);
 const trial = {
   sourceId,
   startSeconds: 0,
   durationSeconds: 10,
   regions: [{ id: randomUUID(), tableId, x: 0.1, y: 0.2, width: 0.2, height: 0.2 }],
+};
+const wristOptions = {
+  wristTrial: true,
+  tabletopRegions: [{ ...trial.regions[0], id: randomUUID() }],
 };
 beforeAll(async () => {
   backend.addHook('onRequest', async () => {
@@ -48,10 +53,13 @@ beforeAll(async () => {
       .send(Buffer.from('test'));
   });
   backend.post('/restaurants/:restaurantId/jobs', (request, reply) => {
+    lastStarted = request.body;
     expect(request.params).toEqual({ restaurantId: tenant });
-    const { detectionMode, poseModel } = request.body as {
+    const { detectionMode, poseModel, wristTrial, tabletopRegions } = request.body as {
       detectionMode?: string;
       poseModel?: string;
+      wristTrial?: boolean;
+      tabletopRegions?: unknown[];
     };
     expect(['FULL_FRAME', 'SEAT_FOCUS', undefined]).toContain(detectionMode);
     expect(['RTMPOSE_TINY', 'RTMPOSE_MEDIUM', undefined]).toContain(poseModel);
@@ -59,6 +67,8 @@ beforeAll(async () => {
       ...trial,
       ...(detectionMode === undefined ? {} : { detectionMode }),
       ...(poseModel === undefined ? {} : { poseModel }),
+      ...(wristTrial === undefined ? {} : { wristTrial }),
+      ...(tabletopRegions === undefined ? {} : { tabletopRegions }),
     });
     return reply.code(202).send({ id: randomUUID(), status: 'RUNNING', progress: 0 });
   });
@@ -204,6 +214,44 @@ describe('owner-only recorded-video gateway', () => {
     ])
       expect((await send(valid)).statusCode).toBe(202);
   });
+  it('validates tabletop geometry, activation and table scope before starting a wrist trial', async () => {
+    const send = (body: Record<string, unknown>) =>
+      app.inject({
+        method: 'POST',
+        url: `/api/restaurants/${tenant}/video-lab/jobs`,
+        headers: { cookie: identities.OWNER.cookie },
+        payload: body,
+      });
+    const top = wristOptions.tabletopRegions[0];
+    const initial = calls;
+    for (const extra of [
+      { wristTrial: true },
+      { ...wristOptions, wristTrial: 'true' },
+      { tabletopRegions: [top] },
+      { wristTrial: true, tabletopRegions: [trial.regions[0]] },
+      { wristTrial: true, tabletopRegions: [{ ...top, tableId: randomUUID() }] },
+      { wristTrial: true, tabletopRegions: [{ ...top, x: 0.95 }] },
+      {
+        wristTrial: true,
+        tabletopRegions: Array.from({ length: 41 }, () => ({ ...top, id: randomUUID() })),
+      },
+    ])
+      expect((await send({ ...trial, ...extra })).statusCode).toBe(400);
+    const foreign = randomUUID();
+    expect(
+      (
+        await send({
+          ...trial,
+          wristTrial: true,
+          regions: [{ ...trial.regions[0], tableId: foreign }],
+          tabletopRegions: [{ ...top, tableId: foreign }],
+        })
+      ).statusCode,
+    ).toBe(400);
+    expect(calls).toBe(initial);
+    expect((await send({ ...trial, ...wristOptions })).statusCode).toBe(202);
+    expect(lastStarted).toEqual({ ...trial, ...wristOptions });
+  });
   it('preserves focused merge diagnostics and historical reports through both job routes', async () => {
     const report: TrialReport = {
       mode: 'RECORDED_VIDEO_DRY_RUN',
@@ -231,6 +279,7 @@ describe('owner-only recorded-video gateway', () => {
         {
           ...report,
           poseModel: 'RTMPOSE_MEDIUM' as const,
+          ...wristOptions,
           focusMergePolicy: 'ALIGNED_CONTAINMENT_V1' as const,
         },
       ]) {

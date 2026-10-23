@@ -73,7 +73,7 @@ export async function registerVideoLab(
     const id = await owner(request);
     const trial = videoTrialSchema.parse(request.body);
     const allowed = await tableIds(id);
-    if (trial.regions.some((r) => !allowed.has(r.tableId)))
+    if ([...trial.regions, ...(trial.tabletopRegions ?? [])].some((r) => !allowed.has(r.tableId)))
       throw new DomainError('INVALID_TABLE', 'اختر طاولات موجودة في هذا المطعم', 400);
     const response = await upstream(`/restaurants/${id}/jobs`, trial);
     return reply.code(response.status).send(await response.json());

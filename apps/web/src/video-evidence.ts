@@ -1,4 +1,20 @@
-import type { TrialEvidence, TrialPerson } from '@restoradar/contracts';
+import type { TrialEvidence, TrialPerson, WristEvidence } from '@restoradar/contracts';
+
+export const wristReasonLabels: Record<WristEvidence['reason'], string> = {
+  NO_TRACK: 'لا يوجد تتبع صالح',
+  LOW_DETECTION_SCORE: 'رصد الشخص ضعيف',
+  STANDING: 'وقوف ظاهر؛ إشارة المعصمين مستبعدة',
+  WRIST_UNCERTAIN: 'موضع المعصمين غير موثوق',
+  NO_TABLETOP_MATCH: 'المعصمان خارج مناطق سطح الطاولة',
+  AMBIGUOUS_TABLETOP: 'تعارض مناطق سطح الطاولة',
+  NO_SEAT_MATCH: 'الجسم خارج مناطق المقاعد',
+  AMBIGUOUS_SEAT: 'الجسم داخل أكثر من منطقة مقعد',
+  TABLE_MISMATCH: 'الجسم والمعصم مرتبطان بطاولتين مختلفتين',
+  SEAT_CONFLICT: 'تعارض تتبع أشخاص في المقعد نفسه',
+  MOVING: 'حركة الجسم تتجاوز حد الثبات',
+  DWELLING: 'بانتظار خمس ثوانٍ متواصلة',
+  PROBABLE: 'إشغال مرجّح بإشارة المعصمين؛ ليس تأكيد جلوس',
+};
 
 export const evidenceLabels: Record<TrialEvidence, string> = {
   ACCEPTED: 'دليل جلوس مقبول للتحقق',
