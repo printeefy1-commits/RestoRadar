@@ -16,7 +16,12 @@ import models
 class OptionalPoseArtifactTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name) / "models"
+        self.root.mkdir()
+        self.bundle = Path(self.temp.name) / "bundle"
+        self.bundle.mkdir()
+        self.bundle_change = patch.object(models, "BUNDLED_DIR", self.bundle)
+        self.bundle_change.start()
         self.change = patch.object(models, "MODEL_DIR", self.root)
         self.change.start()
         for name in models.ARTIFACTS:
@@ -25,11 +30,21 @@ class OptionalPoseArtifactTests(unittest.TestCase):
             name: {"url": url, "sha256": models.digest(self.root / f"{name}.onnx")}
             for name, url in models.ARTIFACTS.items()
         }
+        self.baseline["detector"].update(
+            sourceSha256=models.DETECTOR_SOURCE_SHA256, model="YOLO11_LARGE"
+        )
+        (self.bundle / "yolo11l.onnx").write_bytes(
+            (self.root / "detector.onnx").read_bytes()
+        )
+        (self.bundle / "detector.json").write_text(
+            json.dumps(self.baseline["detector"])
+        )
         (self.root / "manifest.json").write_text(json.dumps(self.baseline))
         self.originals = {p.name: p.read_bytes() for p in self.root.iterdir()}
 
     def tearDown(self):
         self.change.stop()
+        self.bundle_change.stop()
         self.temp.cleanup()
 
     def assert_baseline_untouched(self):
@@ -46,6 +61,56 @@ class OptionalPoseArtifactTests(unittest.TestCase):
             if multiple:
                 bundle.writestr("second.onnx", data)
         return stream.getvalue()
+
+    def test_upgrade_replaces_old_detector_and_preserves_both_pose_caches(self):
+        (self.root / "pose-medium.onnx").write_bytes(b"optional pose unchanged")
+        (self.root / "pose-medium.json").write_text("optional metadata unchanged")
+        old = {**self.baseline, "detector": {"url": "old-yolox", "sha256": "old"}}
+        (self.root / "manifest.json").write_text(json.dumps(old))
+        (self.root / "detector.onnx").write_bytes(b"old tiny detector")
+        self.assertIsNone(models.manifest())
+        with patch("urllib.request.urlopen") as fetch:
+            models.prepare()
+            models.prepare()
+        fetch.assert_not_called()
+        self.assertEqual(models.manifest(), self.baseline)
+        self.assertEqual(
+            (self.root / "pose.onnx").read_bytes(), self.originals["pose.onnx"]
+        )
+        self.assertEqual(
+            (self.root / "detector.onnx").read_bytes(), self.originals["detector.onnx"]
+        )
+        self.assertEqual(
+            (self.root / "pose-medium.onnx").read_bytes(), b"optional pose unchanged"
+        )
+        self.assertEqual(
+            (self.root / "pose-medium.json").read_text(), "optional metadata unchanged"
+        )
+
+    def test_corrupt_bundle_or_wrong_source_fails_without_repinning_cache(self):
+        (self.root / "detector.onnx").write_bytes(b"old detector")
+        old = (self.root / "detector.onnx").read_bytes()
+        (self.bundle / "yolo11l.onnx").write_bytes(b"corrupted large model")
+        with self.assertRaisesRegex(ValueError, "checksum"):
+            models.prepare()
+        self.assertEqual((self.root / "detector.onnx").read_bytes(), old)
+        record = self.baseline["detector"] | {"sourceSha256": "b" * 64}
+        (self.bundle / "detector.json").write_text(json.dumps(record))
+        with self.assertRaisesRegex(ValueError, "provenance"):
+            models.prepare()
+        self.assertEqual((self.root / "detector.onnx").read_bytes(), old)
+
+    def test_pose_repair_cannot_repin_a_previously_recorded_weight(self):
+        (self.root / "pose.onnx").write_bytes(b"damaged cache")
+        with patch(
+            "urllib.request.urlopen",
+            return_value=io.BytesIO(self.archive(b"different pose source")),
+        ):
+            with self.assertRaisesRegex(ValueError, "recorded digest"):
+                models.prepare()
+        self.assertEqual(
+            json.loads((self.root / "manifest.json").read_text()), self.baseline
+        )
 
     def test_tiny_uses_existing_manifest_without_optional_download(self):
         with patch("urllib.request.urlopen") as fetch:

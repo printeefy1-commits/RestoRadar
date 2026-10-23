@@ -271,10 +271,10 @@ class RuntimeTests(unittest.TestCase):
             image[20:30, i : i + 20] = 240
             writer.write(image)
         writer.release()
+        detections = np.zeros((1, 84, 8400), np.float32)
+        detections[0, :5, 0] = [222, 334, 324, 416, 0.95]
         constant_graph(
-            self.model_dir / "detector.onnx",
-            [1, 3, 416, 416],
-            {"dets": np.array([[[40, 30, 250, 300, 0.95]]], dtype=np.float32)},
+            self.model_dir / "detector.onnx", [1, 3, 640, 640], {"output0": detections}
         )
         x, y = np.zeros((1, 17, 384), np.float32), np.zeros((1, 17, 512), np.float32)
         for index in range(17):
@@ -292,9 +292,19 @@ class RuntimeTests(unittest.TestCase):
             name: {"url": url, "sha256": models.digest(self.model_dir / f"{name}.onnx")}
             for name, url in models.ARTIFACTS.items()
         }
+        self.bundle_dir = self.root / "bundle"
+        self.bundle_dir.mkdir()
+        (self.bundle_dir / "yolo11l.onnx").write_bytes(
+            (self.model_dir / "detector.onnx").read_bytes()
+        )
+        records["detector"].update(
+            sourceSha256=models.DETECTOR_SOURCE_SHA256, model="YOLO11_LARGE"
+        )
+        (self.bundle_dir / "detector.json").write_text(json.dumps(records["detector"]))
         (self.model_dir / "manifest.json").write_text(json.dumps(records))
         self.patches = [
             patch.object(models, "MODEL_DIR", self.model_dir),
+            patch.object(models, "BUNDLED_DIR", self.bundle_dir),
             patch.object(analyze, "MODEL_DIR", self.model_dir),
             patch.object(service, "SOURCE", self.source),
             patch.object(service, "sample_cache", None),
@@ -302,6 +312,7 @@ class RuntimeTests(unittest.TestCase):
                 os.environ,
                 {
                     "MODEL_DIR": str(self.model_dir),
+                    "DETECTOR_BUNDLE_DIR": str(self.bundle_dir),
                     "VIDEO_SAMPLE_PATH": str(self.source),
                     "MPLCONFIGDIR": "/tmp/restoradar-test-matplotlib",
                 },
@@ -691,6 +702,10 @@ class RuntimeTests(unittest.TestCase):
                 time.sleep(0.1)
             self.assertEqual(job["status"], "COMPLETED", job)
             self.assertEqual(len(job["report"]["events"]), 1)
+            self.assertEqual(job["report"]["detectorModel"], "YOLO11_LARGE")
+            self.assertEqual(
+                job["report"]["models"]["detector"], "YOLO11l (COCO ONNX, 640x640)"
+            )
 
     def test_worker_runs_selected_medium_in_child_process(self):
         record = self.medium_model()

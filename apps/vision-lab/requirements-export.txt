@@ -1,0 +1,5 @@
+# Build stage only. CPU PyTorch/torchvision are installed from the PyTorch index.
+ultralytics==8.3.240
+onnx==1.18.0
+numpy==2.2.6
+opencv-python==4.11.0.86

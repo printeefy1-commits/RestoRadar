@@ -77,6 +77,8 @@ class CpuPose(RTMPose):
 
 
 class PersonDetector:
+    """Fixed COCO YOLO11l export: RGB/255 letterbox, raw xywh + 80 classes."""
+
     def __init__(self, path):
         options = ort.SessionOptions()
         options.intra_op_num_threads = 2
@@ -84,41 +86,75 @@ class PersonDetector:
         self.session = ort.InferenceSession(
             str(path), sess_options=options, providers=["CPUExecutionProvider"]
         )
-        self.input = self.session.get_inputs()[0]
-        self.size = tuple(
-            v if isinstance(v, int) and v > 0 else 416 for v in self.input.shape[2:]
-        )
+        inputs, outputs = self.session.get_inputs(), self.session.get_outputs()
+        if (
+            len(inputs) != 1
+            or inputs[0].shape != [1, 3, 640, 640]
+            or inputs[0].type != "tensor(float)"
+            or len(outputs) != 1
+            or outputs[0].shape != [1, 84, 8400]
+            or outputs[0].type != "tensor(float)"
+        ):
+            raise ValueError("Unsupported YOLO11l detector interface")
+        self.input = inputs[0]
 
-    def __call__(self, frame):
-        height, width = self.size
-        ratio = min(height / frame.shape[0], width / frame.shape[1])
-        image = np.full((height, width, 3), 114, dtype=np.uint8)
-        resized = cv2.resize(
-            frame, (int(frame.shape[1] * ratio), int(frame.shape[0] * ratio))
+    @staticmethod
+    def preprocess(frame):
+        ratio = min(640 / frame.shape[0], 640 / frame.shape[1])
+        width, height = round(frame.shape[1] * ratio), round(frame.shape[0] * ratio)
+        left, top = (640 - width) // 2, (640 - height) // 2
+        image = np.full((640, 640, 3), 114, dtype=np.uint8)
+        image[top : top + height, left : left + width] = cv2.resize(
+            frame, (width, height)
         )
-        image[: resized.shape[0], : resized.shape[1]] = resized
-        tensor = np.ascontiguousarray(image.transpose(2, 0, 1)[None], dtype=np.float32)
-        outputs = self.session.run(None, {self.input.name: tensor})
-        predictions = outputs[0]
-        # The named person-only MMDeploy export returns NMS xyxy+score.
-        if predictions.ndim == 3 and predictions.shape[-1] == 5:
-            boxes, scores = predictions[0, :, :4] / ratio, predictions[0, :, 4]
-        else:
-            raise ValueError(
-                f"Unsupported detector export: {predictions.shape}; expected person-only NMS output"
-            )
-        keep = np.isfinite(boxes).all(axis=1) & np.isfinite(scores) & (scores >= 0.1)
-        boxes, scores = boxes[keep].copy(), scores[keep].copy()
-        boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0, frame.shape[1])
-        boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, frame.shape[0])
+        tensor = np.ascontiguousarray(
+            image[:, :, ::-1].transpose(2, 0, 1)[None], dtype=np.float32
+        )
+        tensor /= 255.0
+        return tensor, ratio, left, top
+
+    @staticmethod
+    def postprocess(predictions, frame_shape, ratio, left, top):
+        if predictions.shape != (1, 84, 8400):
+            raise ValueError("Unsupported YOLO11l detector output")
+        rows = predictions[0].T
+        # Class 0 must win among all COCO classes; a non-person's secondary
+        # person score is not evidence of a person.
+        keep = (
+            np.isfinite(rows).all(axis=1)
+            & (np.argmax(rows[:, 4:], axis=1) == 0)
+            & (rows[:, 4] >= 0.1)
+            & (rows[:, 4] <= 1)
+            & (rows[:, 2] > 0)
+            & (rows[:, 3] > 0)
+        )
+        rows = rows[keep]
+        scores = rows[:, 4].copy()
+        boxes = np.column_stack(
+            (rows[:, :2] - rows[:, 2:4] / 2, rows[:, :2] + rows[:, 2:4] / 2)
+        )
+        boxes[:, [0, 2]] = (boxes[:, [0, 2]] - left) / ratio
+        boxes[:, [1, 3]] = (boxes[:, [1, 3]] - top) / ratio
+        boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0, frame_shape[1])
+        boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, frame_shape[0])
         valid = ((boxes[:, 2] - boxes[:, 0]) >= 3) & ((boxes[:, 3] - boxes[:, 1]) >= 3)
         boxes, scores = boxes[valid], scores[valid]
-        keep = np.argsort(-scores)[:30]
+        # Apply NMS before the cap, so duplicate anchors cannot consume the
+        # available person slots. Existing cross-view merge remains separate.
+        xywh = np.column_stack((boxes[:, :2], boxes[:, 2:] - boxes[:, :2]))
+        keep = np.asarray(
+            cv2.dnn.NMSBoxes(xywh.tolist(), scores.tolist(), 0.0, 0.7), dtype=int
+        ).reshape(-1)[:30]
         return sv.Detections(
             xyxy=boxes[keep],
             confidence=scores[keep],
             class_id=np.zeros(len(keep), dtype=int),
         )
+
+    def __call__(self, frame):
+        tensor, ratio, left, top = self.preprocess(frame)
+        outputs = self.session.run(None, {self.input.name: tensor})
+        return self.postprocess(outputs[0], frame.shape, ratio, left, top)
 
 
 def atomic_json(path, value):
@@ -317,9 +353,10 @@ def analyze(source, config, output, progress):
         "mode": "RECORDED_VIDEO_DRY_RUN",
         "detectionMode": detection_mode,
         "poseModel": pose_model,
+        "detectorModel": "YOLO11_LARGE",
         "sourceId": config["sourceId"],
         "models": {
-            "detector": "YOLOX-tiny (HumanArt ONNX)",
+            "detector": "YOLO11l (COCO ONNX, 640x640)",
             "pose": selected_pose["label"],
             "tracker": "ByteTrack (supervision 0.25.1)",
             "artifacts": {

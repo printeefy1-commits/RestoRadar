@@ -102,6 +102,7 @@ export interface TrialReport {
   poseModel?: 'RTMPOSE_TINY' | 'RTMPOSE_MEDIUM';
   focusMergePolicy?: 'ALIGNED_CONTAINMENT_V1';
   sourceId: string;
+  detectorModel?: 'YOLO11_LARGE';
   models: { detector: string; pose: string; tracker: string; artifacts: Record<string, string> };
   startSeconds: number;
   endSeconds: number;

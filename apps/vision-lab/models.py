@@ -1,19 +1,38 @@
-"""Fetch named upstream ONNX artifacts; never extract ZIP paths or accept URLs."""
+"""Install the verified detector bundle and fetch fixed pose archives safely."""
 
 import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import tempfile
 import urllib.request
 import zipfile
 
 MODEL_DIR = Path(os.environ.get("MODEL_DIR", "/models"))
 BASE = "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/"
+DETECTOR_SOURCE_URL = "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11l.pt?download=1"
+DETECTOR_SOURCE_SHA256 = (
+    "9ebd0e09d59811db4b1d61e2bc6730649608b1ac47f8dd01e2da6bca7c20023f"
+)
+BUNDLED_DIR = Path(os.environ.get("DETECTOR_BUNDLE_DIR", "/opt/restoradar-detector"))
 ARTIFACTS = {
-    "detector": BASE + "yolox_tiny_8xb8-300e_humanart-6f3252f9.zip",
+    "detector": DETECTOR_SOURCE_URL,
     "pose": BASE + "rtmpose-t_simcc-body7_pt-body7_420e-256x192-026a1439_20230504.zip",
 }
+
+
+def detector_record():
+    data = json.loads((BUNDLED_DIR / "detector.json").read_text())
+    if (
+        data["url"] != DETECTOR_SOURCE_URL
+        or data["sourceSha256"] != DETECTOR_SOURCE_SHA256
+        or data["model"] != "YOLO11_LARGE"
+    ):
+        raise ValueError("Invalid bundled YOLO11l provenance")
+    return data
+
+
 POSE_MODELS = {
     "RTMPOSE_TINY": {
         "file": "pose",
@@ -50,6 +69,8 @@ def manifest():
                 or digest(MODEL_DIR / f"{name}.onnx") != data[name]["sha256"]
             ):
                 return None
+        if data["detector"]["sha256"] != detector_record()["sha256"]:
+            return None
         return data
     except (OSError, KeyError, ValueError, TypeError):
         return None
@@ -90,7 +111,38 @@ def prepare():
     if manifest():
         return
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    records = {name: download_artifact(name, url) for name, url in ARTIFACTS.items()}
+    try:
+        previous = json.loads((MODEL_DIR / "manifest.json").read_text())
+    except (OSError, ValueError):
+        previous = {}
+    records = {}
+    for name, url in ARTIFACTS.items():
+        if name == "detector":
+            record = detector_record()
+            source = BUNDLED_DIR / "yolo11l.onnx"
+            if digest(source) != record["sha256"]:
+                raise ValueError("Bundled YOLO11l checksum mismatch")
+            with tempfile.TemporaryDirectory(dir=MODEL_DIR) as temp:
+                target = Path(temp) / "detector.onnx"
+                shutil.copyfile(source, target)
+                target.replace(MODEL_DIR / "detector.onnx")
+            records[name] = record
+        else:
+            # Upgrade an existing installation without downloading its valid
+            # pose weights again or changing optional pose cache files.
+            cached = previous.get(name, {}) if isinstance(previous, dict) else {}
+            if not isinstance(cached, dict):
+                cached = {}
+            target = MODEL_DIR / f"{name}.onnx"
+            if (
+                cached.get("url") == url
+                and target.is_file()
+                and digest(target) == cached.get("sha256")
+            ):
+                records[name] = cached
+            else:
+                expected = cached.get("sha256") if cached.get("url") == url else None
+                records[name] = download_artifact(name, url, expected)
     # HTTPS authenticates the source. These are recorded digests, not upstream signatures.
     tmp = MODEL_DIR / "manifest.tmp"
     tmp.write_text(json.dumps(records, indent=2))
