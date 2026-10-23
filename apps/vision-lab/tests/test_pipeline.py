@@ -22,7 +22,7 @@ from onnx import TensorProto, helper, numpy_helper
 from fastapi.testclient import TestClient
 
 import analyze
-from decisions import SeatingVerifier, mapped_table, seated_anchor
+from decisions import SeatingVerifier, mapped_table, seated_anchor, seating_evidence
 import models
 import service
 
@@ -50,6 +50,30 @@ def constant_graph(path, shape, outputs):
 
 
 class DecisionTests(unittest.TestCase):
+    def test_diagnostics_distinguish_posture_mapping_and_detection_score(self):
+        region = {"tableId": "table", "x": 0, "y": 0, "width": 0.5, "height": 0.5}
+        self.assertEqual(
+            seating_evidence(None, [region], 100, 100, 0.9), (None, "POSE_UNCERTAIN")
+        )
+        self.assertEqual(
+            seating_evidence([75, 75], [region], 100, 100, 0.9), (None, "UNMAPPED")
+        )
+        self.assertEqual(
+            seating_evidence(
+                [25, 25], [region, {**region, "tableId": "other"}], 100, 100, 0.9
+            ),
+            (None, "AMBIGUOUS_REGIONS"),
+        )
+        # Matching two seats of the same table is still an unambiguous table mapping.
+        self.assertEqual(
+            seating_evidence([25, 25], [region, region], 100, 100, 0.35),
+            ("table", "ACCEPTED"),
+        )
+        self.assertEqual(
+            seating_evidence([25, 25], [region], 100, 100, 0.1659),
+            ("table", "LOW_DETECTION_SCORE"),
+        )
+
     def test_five_seconds_and_unknown_never_departure(self):
         verifier = SeatingVerifier(["table"])
         events = []
@@ -188,6 +212,23 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(report["events"][0]["observedSeconds"], 0)
         self.assertAlmostEqual(report["events"][0]["confirmedSeconds"], 5, places=2)
         self.assertGreaterEqual(report["analyzedSamples"], 16)
+        self.assertEqual(report["evidencePolicy"]["minDetectionScore"], 0.35)
+        for sample in report["samples"]:
+            self.assertEqual(sample["detectedBoxes"], 1)
+            for person in sample["people"]:
+                self.assertEqual(person["evidence"], "ACCEPTED")
+                self.assertEqual(len(person["seatedAnchor"]), 2)
+                self.assertEqual(
+                    {p["part"] for p in person["posePoints"]},
+                    {
+                        "LEFT_SHOULDER",
+                        "RIGHT_SHOULDER",
+                        "LEFT_HIP",
+                        "RIGHT_HIP",
+                        "LEFT_KNEE",
+                        "RIGHT_KNEE",
+                    },
+                )
         self.assertEqual(
             len({p["trackId"] for s in report["samples"] for p in s["people"]}), 1
         )
@@ -207,6 +248,43 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(
             all(set(s["tables"].values()) == {"UNKNOWN"} for s in report["samples"])
         )
+        self.assertTrue(all(s["detectedBoxes"] == 0 for s in report["samples"]))
+
+    def test_low_detection_score_does_not_confirm_even_when_pose_and_mapping_match(
+        self,
+    ):
+        # Exercise actual ORT and ByteTrack, including a previously activated track.
+        real_detector = analyze.PersonDetector
+
+        class FadingDetector:
+            def __init__(self, path):
+                self.detector = real_detector(path)
+                self.calls = 0
+
+            def __call__(self, frame):
+                detections = self.detector(frame)
+                self.calls += 1
+                if self.calls > 2:
+                    detections.confidence[:] = 0.1659
+                return detections
+
+        output = self.root / "low-score.json"
+        with patch.object(analyze, "PersonDetector", FadingDetector):
+            analyze.analyze(
+                self.source, self.config, output, self.root / "progress.json"
+            )
+        report = json.loads(output.read_text())
+        rejected = [
+            p
+            for s in report["samples"]
+            for p in s["people"]
+            if p["evidence"] == "LOW_DETECTION_SCORE"
+        ]
+        self.assertTrue(rejected)
+        self.assertTrue(
+            all(p["posture"] == "SEATED" and p["tableId"] for p in rejected)
+        )
+        self.assertEqual(report["events"], [])
 
     def test_changed_model_is_rejected(self):
         with (self.model_dir / "detector.onnx").open("ab") as out:

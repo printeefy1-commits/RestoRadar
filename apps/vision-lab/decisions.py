@@ -2,8 +2,11 @@
 
 import math
 
+MIN_DETECTION_SCORE = 0.35
+MIN_KEYPOINT_SCORE = 0.4
 
-def seated_anchor(points, scores, threshold=0.4):
+
+def seated_anchor(points, scores, threshold=MIN_KEYPOINT_SCORE):
     # COCO body indices: shoulders 5/6, hips 11/12, knees 13/14.
     # A bent torso/thigh angle is a provisional, camera-dependent posture cue.
     anchors = []
@@ -25,17 +28,35 @@ def seated_anchor(points, scores, threshold=0.4):
     return [sum(float(p[i]) for p in anchors) / len(anchors) for i in (0, 1)]
 
 
-def mapped_table(anchor, regions, width, height):
+def matching_tables(anchor, regions, width, height):
     if anchor is None:
-        return None
+        return set()
     x, y = anchor[0] / width, anchor[1] / height
-    matches = {
+    return {
         r["tableId"]
         for r in regions
         if r["x"] <= x <= r["x"] + r["width"] and r["y"] <= y <= r["y"] + r["height"]
     }
+
+
+def mapped_table(anchor, regions, width, height):
+    matches = matching_tables(anchor, regions, width, height)
     # Ambiguous mappings cannot assign a person to two tables.
     return next(iter(matches)) if len(matches) == 1 else None
+
+
+def seating_evidence(anchor, regions, width, height, detection_score):
+    if anchor is None:
+        return None, "POSE_UNCERTAIN"
+    matches = matching_tables(anchor, regions, width, height)
+    if not matches:
+        return None, "UNMAPPED"
+    if len(matches) > 1:
+        return None, "AMBIGUOUS_REGIONS"
+    table_id = next(iter(matches))
+    if not math.isfinite(detection_score) or detection_score < MIN_DETECTION_SCORE:
+        return table_id, "LOW_DETECTION_SCORE"
+    return table_id, "ACCEPTED"
 
 
 class SeatingVerifier:

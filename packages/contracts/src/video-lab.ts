@@ -32,12 +32,22 @@ export interface VideoLabStatus {
   message?: string;
   source: { id: string; duration: number; width: number; height: number; bytes: number } | null;
 }
+export type TrialEvidence =
+  'ACCEPTED' | 'POSE_UNCERTAIN' | 'UNMAPPED' | 'AMBIGUOUS_REGIONS' | 'LOW_DETECTION_SCORE';
 export interface TrialPerson {
   box: [number, number, number, number];
   trackId: number | null;
   posture: 'SEATED' | 'UNCERTAIN';
   tableId: string | null;
   score: number;
+  evidence?: TrialEvidence;
+  seatedAnchor?: [number, number] | null;
+  posePoints?: {
+    part:
+      'LEFT_SHOULDER' | 'RIGHT_SHOULDER' | 'LEFT_HIP' | 'RIGHT_HIP' | 'LEFT_KNEE' | 'RIGHT_KNEE';
+    point: [number, number];
+    score: number;
+  }[];
 }
 export interface TrialReport {
   mode: 'RECORDED_VIDEO_DRY_RUN';
@@ -49,6 +59,7 @@ export interface TrialReport {
   processingSeconds: number;
   samplesPerProcessingSecond: number;
   departureEvaluated: false;
+  evidencePolicy?: { minDetectionScore: number; minKeypointScore: number; seatingSeconds: number };
   regions: SeatRegion[];
   events: {
     tableId: string;
@@ -58,6 +69,8 @@ export interface TrialReport {
   }[];
   samples: {
     seconds: number;
+    /** Detector boxes before ByteTrack filtering; not a unique person count. */
+    detectedBoxes?: number;
     people: TrialPerson[];
     tables: Record<string, 'OCCUPIED' | 'UNKNOWN'>;
   }[];

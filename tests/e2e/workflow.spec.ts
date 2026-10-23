@@ -367,8 +367,30 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
                 tableId: submitted!.regions[0].tableId,
                 score: 0.9,
               },
+              {
+                box: [0.55, 0.1, 0.8, 0.8],
+                trackId: 39,
+                posture: 'SEATED',
+                tableId: submitted!.regions[0].tableId,
+                score: 0.1659,
+              },
             ],
             tables: { [submitted!.regions[0].tableId]: 'OCCUPIED' },
+          },
+          {
+            seconds: 5.5,
+            detectedBoxes: 6,
+            people: [
+              {
+                box: [0.55, 0.1, 0.8, 0.8],
+                trackId: 39,
+                posture: 'SEATED',
+                tableId: submitted!.regions[0].tableId,
+                score: 0.1659,
+                evidence: 'LOW_DETECTION_SCORE',
+              },
+            ],
+            tables: { [submitted!.regions[0].tableId]: 'UNKNOWN' },
           },
         ],
       };
@@ -410,6 +432,12 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
   await expect
     .poll(() => page.locator('video').evaluate((element: HTMLVideoElement) => element.currentTime))
     .toBeCloseTo(5, 1);
+  const diagnostics = page.getByRole('region', { name: 'تشخيص العينة الحالية', exact: true });
+  await expect(diagnostics).toContainText(
+    'أشخاص مرصودون: 2 · بوضعية جلوس: 2 · أدلة مقبولة للتحقق: 1',
+  );
+  await diagnostics.getByText('أسباب قبول الرصد واستبعاده', { exact: true }).click();
+  await expect(diagnostics.getByText(/#39 · جلوس مستبعد: رصد ضعيف/)).toBeVisible();
   // Inspect the actual canvas: blue seat pixels must disappear even with a retained report.
   const bluePixels = () =>
     page.locator('canvas').evaluate((canvas: HTMLCanvasElement) => {
@@ -423,6 +451,33 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
   await expect.poll(bluePixels).toBeGreaterThan(0);
   await page.getByRole('button', { name: 'حذف المنطقة 1', exact: true }).click();
   await expect.poll(bluePixels).toBe(0);
+  await page.locator('video').evaluate((element: HTMLVideoElement) => {
+    element.currentTime = 5.5;
+  });
+  await expect(diagnostics).toContainText(
+    'أشخاص مرصودون: 1 · بوضعية جلوس: 1 · أدلة مقبولة للتحقق: 0',
+  );
+  await expect(diagnostics).toContainText('صناديق الأشخاص قبل التتبع: 6');
+  await expect(diagnostics.getByText(/الإشغال غير محسوم في هذه العينة/)).toBeVisible();
+  await expect
+    .poll(() =>
+      page.locator('canvas').evaluate((canvas: HTMLCanvasElement) => {
+        const pixels = canvas
+          .getContext('2d')!
+          .getImageData(0, 0, canvas.width, canvas.height).data;
+        let green = 0;
+        for (let i = 0; i < pixels.length; i += 4)
+          if (
+            pixels[i] === 35 &&
+            pixels[i + 1] === 211 &&
+            pixels[i + 2] === 152 &&
+            pixels[i + 3] > 0
+          )
+            green++;
+        return green;
+      }),
+    )
+    .toBe(0);
   await page.getByRole('button', { name: 'استخدام مناطق التقرير السابق', exact: true }).click();
   await expect.poll(bluePixels).toBeGreaterThan(0);
   await page.getByRole('button', { name: 'حذف المنطقة 1', exact: true }).click();

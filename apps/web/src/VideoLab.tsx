@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SeatRegion, Table, TrialJob, VideoLabStatus } from '@restoradar/contracts';
+import { evidenceLabels, trialEvidence } from './video-evidence.ts';
 
 async function request<T>(url: string, body?: unknown): Promise<T> {
   const response = await fetch(url, {
@@ -101,6 +102,7 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
 
   const report = job?.report?.sourceId === status?.source?.id ? job?.report : undefined;
   const sample = report?.samples.find((s) => Math.abs(s.seconds - seconds) < 0.26);
+  const minDetectionScore = report?.evidencePolicy?.minDetectionScore ?? 0.35;
   useEffect(() => {
     const element = canvas.current;
     const context = element?.getContext('2d');
@@ -129,16 +131,17 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
     }
     for (const person of sample?.people ?? []) {
       const [x1, y1, x2, y2] = person.box;
-      context.strokeStyle = person.tableId ? '#23d398' : '#ffd166';
+      const evidence = trialEvidence(person, minDetectionScore);
+      context.strokeStyle = evidence === 'ACCEPTED' ? '#23d398' : '#ffd166';
       context.strokeRect(x1 * w, y1 * h, (x2 - x1) * w, (y2 - y1) * h);
       context.fillStyle = context.strokeStyle;
       context.fillText(
-        `#${person.trackId ?? '?'} · ${person.posture === 'SEATED' ? 'وضعية جلوس' : 'غير محسوم'}`,
+        `#${person.trackId ?? '?'} · ${evidenceLabels[evidence]}`,
         x1 * w,
         Math.max(18, y1 * h - 5),
       );
     }
-  }, [regions, sample, draft, tables]);
+  }, [regions, sample, draft, tables, minDetectionScore]);
 
   function seek(value: number) {
     if (video.current) video.current.currentTime = value;
@@ -495,7 +498,7 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                       ثانية.
                     </p>
                     <p>
-                      {report.events.length} تأكيد جلوس.{' '}
+                      {report.events.length} تأكيد إشغال طاولة، وليس عدد الأشخاص.{' '}
                       {report.events.length === 0 && 'غياب التأكيد لا يعني أن الطاولات فارغة.'}
                     </p>
                     {report.events.map((event) => (
@@ -510,9 +513,49 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                       </div>
                     ))}
                     <p className="muted">
-                      شغّل الفيديو لعرض صناديق الرصد. الألوان تصف دليل النموذج، وليست قياسًا معتمدًا
-                      لدقته. الجلوس الموجود منذ بداية المقطع لا يثبت وقت الوصول الفعلي.
+                      الأخضر دليل جلوس مقبول للتحقق، والأصفر رصد لم يستوفِ شروط التأكيد. تأكيد
+                      الطاولة يتطلب دليلًا متواصلًا لخمس ثوانٍ. درجات الرصد ليست قياسًا معتمدًا
+                      للدقة. الجلوس الموجود منذ بداية المقطع لا يثبت وقت الوصول الفعلي.
                     </p>
+                    {sample && (
+                      <section aria-label="تشخيص العينة الحالية">
+                        {sample.detectedBoxes !== undefined && (
+                          <p>
+                            صناديق الأشخاص قبل التتبع: {sample.detectedBoxes}. هذا ليس عددًا مؤكدًا
+                            للأشخاص.
+                          </p>
+                        )}
+                        <p>
+                          العينة الحالية · أشخاص مرصودون: {sample.people.length} · بوضعية جلوس:{' '}
+                          {sample.people.filter((p) => p.posture === 'SEATED').length} · أدلة مقبولة
+                          للتحقق:{' '}
+                          {
+                            sample.people.filter(
+                              (p) => trialEvidence(p, minDetectionScore) === 'ACCEPTED',
+                            ).length
+                          }
+                        </p>
+                        <details>
+                          <summary>أسباب قبول الرصد واستبعاده</summary>
+                          {sample.people.map((person, index) => (
+                            <p key={`${person.trackId}-${index}`}>
+                              #{person.trackId ?? '?'} ·{' '}
+                              {evidenceLabels[trialEvidence(person, minDetectionScore)]}
+                              {person.tableId && ` · ${tableName(person.tableId)}`} · درجة الرصد{' '}
+                              <bdi>{person.score.toFixed(3)}</bdi>
+                            </p>
+                          ))}
+                          {Object.entries(sample.tables).map(([id, state]) => (
+                            <p key={id}>
+                              {tableName(id)} ·{' '}
+                              {state === 'OCCUPIED'
+                                ? 'إشغال متحقق في هذه العينة'
+                                : 'الإشغال غير محسوم في هذه العينة'}
+                            </p>
+                          ))}
+                        </details>
+                      </section>
+                    )}
                     <details>
                       <summary>النماذج المستخدمة</summary>
                       <p dir="ltr">

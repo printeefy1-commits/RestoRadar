@@ -12,7 +12,13 @@ import onnxruntime as ort
 from rtmlib import RTMPose
 import supervision as sv
 
-from decisions import SeatingVerifier, mapped_table, seated_anchor
+from decisions import (
+    MIN_DETECTION_SCORE,
+    MIN_KEYPOINT_SCORE,
+    SeatingVerifier,
+    seated_anchor,
+    seating_evidence,
+)
 from models import MODEL_DIR, manifest
 
 
@@ -92,7 +98,7 @@ def analyze(source, config, output, progress):
     detector = PersonDetector(MODEL_DIR / "detector.onnx")
     pose = CpuPose(MODEL_DIR / "pose.onnx")
     tracker = sv.ByteTrack(
-        track_activation_threshold=0.35,
+        track_activation_threshold=MIN_DETECTION_SCORE,
         frame_rate=2,
         lost_track_buffer=30,
         minimum_matching_threshold=0.8,
@@ -135,16 +141,21 @@ def analyze(source, config, output, progress):
                 and 5 < float(np.mean(frame)) < 250
             )
             occupied, people = set(), []
+            detected_boxes = 0
             if image_ok:
-                tracked = tracker.update_with_detections(detector(frame))
+                detections = detector(frame)
+                detected_boxes = len(detections)
+                tracked = tracker.update_with_detections(detections)
                 if len(tracked):
                     # Never call RTMPose with an empty bbox array: it would infer on the whole frame.
                     points, scores = pose(frame, bboxes=tracked.xyxy)
                     for i, box in enumerate(tracked.xyxy):
                         anchor = seated_anchor(points[i], scores[i])
-                        table_id = mapped_table(anchor, config["regions"], w, h)
                         score = float(tracked.confidence[i])
-                        if table_id and score >= 0.35:
+                        table_id, evidence = seating_evidence(
+                            anchor, config["regions"], w, h, score
+                        )
+                        if evidence == "ACCEPTED":
                             occupied.add(table_id)
                         people.append(
                             {
@@ -154,20 +165,52 @@ def analyze(source, config, output, progress):
                                     float(box[2] / w),
                                     float(box[3] / h),
                                 ],
-                                "trackId": int(tracked.tracker_id[i])
-                                if tracked.tracker_id is not None
-                                else None,
-                                "posture": "SEATED"
-                                if anchor is not None
-                                else "UNCERTAIN",
+                                "trackId": (
+                                    int(tracked.tracker_id[i])
+                                    if tracked.tracker_id is not None
+                                    else None
+                                ),
+                                "posture": (
+                                    "SEATED" if anchor is not None else "UNCERTAIN"
+                                ),
                                 "tableId": table_id,
                                 "score": round(score, 4),
+                                "evidence": evidence,
+                                "seatedAnchor": (
+                                    [float(anchor[0] / w), float(anchor[1] / h)]
+                                    if anchor is not None
+                                    else None
+                                ),
+                                # Body points only; do not export facial landmarks.
+                                "posePoints": [
+                                    {
+                                        "part": part,
+                                        "point": [
+                                            float(points[i][index][0] / w),
+                                            float(points[i][index][1] / h),
+                                        ],
+                                        "score": float(scores[i][index]),
+                                    }
+                                    for index, part in (
+                                        (5, "LEFT_SHOULDER"),
+                                        (6, "RIGHT_SHOULDER"),
+                                        (11, "LEFT_HIP"),
+                                        (12, "RIGHT_HIP"),
+                                        (13, "LEFT_KNEE"),
+                                        (14, "RIGHT_KNEE"),
+                                    )
+                                ],
                             }
                         )
             states, confirmed = verifier.observe(seconds, occupied)
             events.extend(confirmed)
             samples.append(
-                {"seconds": round(seconds, 3), "people": people, "tables": states}
+                {
+                    "seconds": round(seconds, 3),
+                    "detectedBoxes": detected_boxes,
+                    "people": people,
+                    "tables": states,
+                }
             )
             atomic_json(
                 progress,
@@ -197,6 +240,11 @@ def analyze(source, config, output, progress):
         "processingSeconds": round(elapsed, 3),
         "samplesPerProcessingSecond": round(len(samples) / elapsed, 3),
         "departureEvaluated": False,
+        "evidencePolicy": {
+            "minDetectionScore": MIN_DETECTION_SCORE,
+            "minKeypointScore": MIN_KEYPOINT_SCORE,
+            "seatingSeconds": 5,
+        },
         "regions": config["regions"],
         "events": events,
         "samples": samples,
