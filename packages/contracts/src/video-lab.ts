@@ -103,6 +103,7 @@ export interface TrialReport {
   focusMergePolicy?: 'ALIGNED_CONTAINMENT_V1';
   sourceId: string;
   detectorModel?: 'YOLO11_LARGE';
+  personMergePolicy?: 'STRICT_UPPER_BODY_ALIGNMENT_V1';
   models: { detector: string; pose: string; tracker: string; artifacts: Record<string, string> };
   startSeconds: number;
   endSeconds: number;

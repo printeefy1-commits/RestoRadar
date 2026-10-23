@@ -66,6 +66,25 @@ class Yolo11DetectorTests(unittest.TestCase):
         self.assertEqual(len(people), 2)
         np.testing.assert_allclose(people.confidence, [0.99, 0.5])
 
+    def test_contained_torso_is_removed_before_limit_without_losing_other_people(self):
+        rows = [
+            [30 + (i % 8) * 70, 30 + (i // 8) * 100, 20, 60, 0.8] for i in range(28)
+        ]
+        rows += [
+            [610, 500, 50, 200, 0.7],
+            [610, 460, 50, 120, 0.9],
+            [520, 330, 20, 60, 0.6],
+        ]
+        result = PersonDetector.postprocess(predictions(*rows), (640, 640, 3), 1, 0, 0)
+        self.assertEqual(len(result), 30)
+        self.assertEqual(
+            sum(np.all(np.isclose(result.xyxy, [585, 400, 635, 600]), axis=1)), 1
+        )
+        self.assertFalse(
+            np.any(np.all(np.isclose(result.xyxy, [585, 400, 635, 520]), axis=1))
+        )
+        self.assertAlmostEqual(float(min(result.confidence)), 0.6, places=5)
+
     def test_clipping_empty_and_rejects_old_yolox_output(self):
         raw = predictions([0, 0, 100, 100, 0.9], [-100, -100, 50, 50, 0.95])
         people = PersonDetector.postprocess(raw, (640, 640, 3), 1, 0, 0)

@@ -26,6 +26,7 @@ from focused_detection import (
     detect_with_seat_focus,
 )
 from wrist_trial import WRIST_POLICY, WristTrial, wrist_observation
+from person_duplicates import PERSON_MERGE_POLICY, suppress_aligned_torsos
 
 
 class CpuPose(RTMPose):
@@ -144,12 +145,14 @@ class PersonDetector:
         xywh = np.column_stack((boxes[:, :2], boxes[:, 2:] - boxes[:, :2]))
         keep = np.asarray(
             cv2.dnn.NMSBoxes(xywh.tolist(), scores.tolist(), 0.0, 0.7), dtype=int
-        ).reshape(-1)[:30]
-        return sv.Detections(
+        ).reshape(-1)
+        detected = sv.Detections(
             xyxy=boxes[keep],
             confidence=scores[keep],
             class_id=np.zeros(len(keep), dtype=int),
         )
+        detected = suppress_aligned_torsos(detected)
+        return detected[np.argsort(-detected.confidence, kind="stable")[:30]]
 
     def __call__(self, frame):
         tensor, ratio, left, top = self.preprocess(frame)
@@ -354,6 +357,7 @@ def analyze(source, config, output, progress):
         "detectionMode": detection_mode,
         "poseModel": pose_model,
         "detectorModel": "YOLO11_LARGE",
+        "personMergePolicy": PERSON_MERGE_POLICY,
         "sourceId": config["sourceId"],
         "models": {
             "detector": "YOLO11l (COCO ONNX, 640x640)",

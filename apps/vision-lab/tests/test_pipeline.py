@@ -399,6 +399,37 @@ class RuntimeTests(unittest.TestCase):
             len({p["trackId"] for s in report["samples"] for p in s["people"]}), 1
         )
 
+    def test_duplicate_torso_is_filtered_before_actual_bytetrack_and_pose(self):
+        raw = np.zeros((1, 84, 8400), np.float32)
+        raw[0, :5, 0] = [222, 334, 324, 416, 0.95]
+        raw[0, :5, 1] = [222, 266, 324, 280, 0.99]
+        target = self.model_dir / "detector.onnx"
+        constant_graph(target, [1, 3, 640, 640], {"output0": raw})
+        # Register the newly generated synthetic graph, never real model weights.
+        records = json.loads((self.model_dir / "manifest.json").read_text())
+        records["detector"]["sha256"] = models.digest(target)
+        (self.model_dir / "manifest.json").write_text(json.dumps(records))
+        (self.bundle_dir / "detector.json").write_text(json.dumps(records["detector"]))
+        (self.bundle_dir / "yolo11l.onnx").write_bytes(target.read_bytes())
+        output = self.root / "deduplicated.json"
+        analyze.analyze(self.source, self.config, output, self.root / "progress.json")
+        report = json.loads(output.read_text())
+        self.assertEqual(report["personMergePolicy"], "STRICT_UPPER_BODY_ALIGNMENT_V1")
+        self.assertTrue(
+            all(
+                s["detectedBoxes"] == 1 and len(s["people"]) == 1
+                for s in report["samples"]
+            )
+        )
+        self.assertEqual(
+            len({p["trackId"] for s in report["samples"] for p in s["people"]}), 1
+        )
+        self.assertEqual(len(report["events"]), 1)
+        for sample in report["samples"]:
+            person = sample["people"][0]
+            self.assertAlmostEqual(person["score"], 0.95, places=5)
+            self.assertEqual(person["evidence"], "ACCEPTED")
+
     def test_selected_medium_uses_one_cpu_pose_session_and_preserves_evidence_rules(
         self,
     ):
@@ -703,6 +734,9 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(job["status"], "COMPLETED", job)
             self.assertEqual(len(job["report"]["events"]), 1)
             self.assertEqual(job["report"]["detectorModel"], "YOLO11_LARGE")
+            self.assertEqual(
+                job["report"]["personMergePolicy"], "STRICT_UPPER_BODY_ALIGNMENT_V1"
+            )
             self.assertEqual(
                 job["report"]["models"]["detector"], "YOLO11l (COCO ONNX, 640x640)"
             )
