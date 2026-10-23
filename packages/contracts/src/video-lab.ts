@@ -58,6 +58,7 @@ export interface TrialPerson {
 export interface TrialReport {
   mode: 'RECORDED_VIDEO_DRY_RUN';
   detectionMode?: 'FULL_FRAME' | 'SEAT_FOCUS';
+  focusMergePolicy?: 'ALIGNED_CONTAINMENT_V1';
   sourceId: string;
   models: { detector: string; pose: string; tracker: string; artifacts: Record<string, string> };
   startSeconds: number;

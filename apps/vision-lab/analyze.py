@@ -20,7 +20,11 @@ from decisions import (
     seating_evidence,
 )
 from models import MODEL_DIR, manifest
-from focused_detection import MAX_FOCUS_TABLES, detect_with_seat_focus
+from focused_detection import (
+    FOCUS_MERGE_POLICY,
+    MAX_FOCUS_TABLES,
+    detect_with_seat_focus,
+)
 
 
 class CpuPose(RTMPose):
@@ -266,6 +270,8 @@ def analyze(source, config, output, progress):
         "events": events,
         "samples": samples,
     }
+    if detection_mode == "SEAT_FOCUS":
+        report["focusMergePolicy"] = FOCUS_MERGE_POLICY
     atomic_json(output, report)
 
 

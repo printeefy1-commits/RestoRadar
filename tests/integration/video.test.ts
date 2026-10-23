@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import Fastify from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Pool, migrate, type DatabasePool } from '@restoradar/database';
+import type { TrialJob, TrialReport } from '@restoradar/contracts';
 import { buildApp } from '../../apps/edge-api/src/app.ts';
 import { hashPassword } from '../../apps/edge-api/src/auth.ts';
 
@@ -18,6 +19,7 @@ const backend = Fastify();
 let pool: DatabasePool,
   app: Awaited<ReturnType<typeof buildApp>>,
   calls = 0;
+let storedJob: TrialJob | null = null;
 const sourceId = 'a'.repeat(64);
 const trial = {
   sourceId,
@@ -52,7 +54,11 @@ beforeAll(async () => {
     expect(request.body).toEqual(mode ? { ...trial, detectionMode: mode } : trial);
     return reply.code(202).send({ id: randomUUID(), status: 'RUNNING', progress: 0 });
   });
-  backend.get('/restaurants/:restaurantId/jobs/latest', () => null);
+  backend.get('/restaurants/:restaurantId/jobs/latest', () => storedJob);
+  backend.get('/restaurants/:restaurantId/jobs/:jobId', (request) => {
+    expect(request.params).toEqual({ restaurantId: tenant, jobId: storedJob?.id });
+    return storedJob;
+  });
   const url = await backend.listen({ host: '127.0.0.1', port: 0 });
   await admin.query(`CREATE SCHEMA ${schema}`);
   pool = new Pool({
@@ -176,6 +182,43 @@ describe('owner-only recorded-video gateway', () => {
     expect((await send('unexpected')).statusCode).toBe(400);
     expect(calls).toBe(initial);
     expect((await send('SEAT_FOCUS')).statusCode).toBe(202);
+  });
+  it('preserves focused merge diagnostics and historical reports through both job routes', async () => {
+    const report: TrialReport = {
+      mode: 'RECORDED_VIDEO_DRY_RUN',
+      detectionMode: 'SEAT_FOCUS',
+      sourceId,
+      models: {
+        detector: 'test detector',
+        pose: 'test pose',
+        tracker: 'test tracker',
+        artifacts: {},
+      },
+      startSeconds: 0,
+      endSeconds: 10,
+      analyzedSamples: 21,
+      processingSeconds: 5,
+      samplesPerProcessingSecond: 4.2,
+      departureEvaluated: false,
+      regions: trial.regions,
+      events: [],
+      samples: [{ seconds: 10, focusCrops: 1, people: [], tables: { [tableId]: 'UNKNOWN' } }],
+    };
+    try {
+      for (const currentReport of [
+        report,
+        { ...report, focusMergePolicy: 'ALIGNED_CONTAINMENT_V1' as const },
+      ]) {
+        storedJob = { id: randomUUID(), status: 'COMPLETED', progress: 1, report: currentReport };
+        for (const path of ['/jobs/latest', `/jobs/${storedJob.id}`]) {
+          const response = await get(path);
+          expect(response.statusCode).toBe(200);
+          expect(response.json()).toEqual(storedJob);
+        }
+      }
+    } finally {
+      storedJob = null;
+    }
   });
   it('validates table ownership, bounds and same-origin without mutating live state', async () => {
     const send = (payload: unknown, headers = {}) =>

@@ -5,7 +5,59 @@ import math
 import numpy as np
 import supervision as sv
 
-from decisions import MAX_FOCUS_TABLES
+from decisions import MAX_FOCUS_TABLES, MIN_DETECTION_SCORE
+
+FOCUS_MERGE_POLICY = "ALIGNED_CONTAINMENT_V1"
+
+
+def merge_views(parts):
+    """Prefer a corroborated longer body over a contained upper-body view.
+
+    Containment alone can join different people during occlusion. Only compare
+    different inference views with nearly the same upper-body position/width.
+    Keep a selected box's own score; a confident torso cannot upgrade a weak
+    full-body detection. These are camera-dependent heuristics, not identity.
+    """
+    merged = sv.Detections.merge(parts)
+    if not len(merged):
+        return merged
+    views = np.concatenate([np.full(len(part), i) for i, part in enumerate(parts)])
+    boxes = merged.xyxy
+    widths, heights = boxes[:, 2] - boxes[:, 0], boxes[:, 3] - boxes[:, 1]
+    areas = widths * heights
+    centers_x = (boxes[:, 0] + boxes[:, 2]) / 2
+    suppressed = set()
+    # Direct comparisons only: a suppressed intermediate box cannot join two
+    # otherwise distinct people through a transitive chain of overlaps.
+    for outer in np.argsort(-areas, kind="stable"):
+        if outer in suppressed or merged.confidence[outer] < MIN_DETECTION_SCORE:
+            continue
+        for inner in range(len(merged)):
+            if inner == outer or inner in suppressed or views[inner] == views[outer]:
+                continue
+            if areas[inner] <= 0 or heights[inner] > 0.85 * heights[outer]:
+                continue
+            if min(widths[inner], widths[outer]) < 0.65 * max(
+                widths[inner], widths[outer]
+            ):
+                continue
+            if abs(centers_x[inner] - centers_x[outer]) > 0.2 * min(
+                widths[inner], widths[outer]
+            ):
+                continue
+            if abs(boxes[inner, 1] - boxes[outer, 1]) > 0.2 * heights[inner]:
+                continue
+            overlap = np.maximum(
+                0,
+                np.minimum(boxes[inner, 2:], boxes[outer, 2:])
+                - np.maximum(boxes[inner, :2], boxes[outer, :2]),
+            )
+            if float(np.prod(overlap)) >= 0.95 * areas[inner]:
+                suppressed.add(inner)
+    merged = merged[np.array([i not in suppressed for i in range(len(merged))])]
+    # Similar complete-body views still use ordinary confidence-based NMS.
+    merged = merged.with_nms(threshold=0.6, class_agnostic=True)
+    return merged[np.argsort(-merged.confidence, kind="stable")[:30]]
 
 
 def seat_crops(regions, width, height):
@@ -49,9 +101,4 @@ def detect_with_seat_focus(detector, frame, regions):
                 class_id=detected.class_id,
             )
         )
-    merged = sv.Detections.merge(parts)
-    if len(merged):
-        # Merge duplicate views before tracking so one person has one candidate box.
-        merged = merged.with_nms(threshold=0.6, class_agnostic=True)
-        merged = merged[np.argsort(-merged.confidence)[:30]]
-    return merged, len(crops)
+    return merge_views(parts), len(crops)
