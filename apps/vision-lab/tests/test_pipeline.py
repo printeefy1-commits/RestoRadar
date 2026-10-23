@@ -235,6 +235,10 @@ class FocusedDetectionTests(unittest.TestCase):
             service.Trial(**{**trial, "poseModel": "RTMPOSE_MEDIUM"}).poseModel,
             "RTMPOSE_MEDIUM",
         )
+        self.assertEqual(
+            service.Trial(**{**trial, "poseModel": "YOLO26_SMALL_POSE"}).poseModel,
+            "YOLO26_SMALL_POSE",
+        )
         for invalid in ("unknown", "https://example.invalid/model.onnx"):
             with self.assertRaises(ValueError):
                 service.Trial(**{**trial, "poseModel": invalid})
@@ -371,142 +375,181 @@ class RuntimeTests(unittest.TestCase):
         (self.model_dir / "pose-medium.json").write_text(json.dumps(record))
         return record
 
-    def nano_model(self, keypoint_score=1):
+    def yolo26_model(self, name=yolo26_models.MODEL, keypoint_score=1):
+        selected = yolo26_models.spec(name)
         raw = np.zeros((1, 300, 57), np.float32)
         raw[0, 0, :6] = [60, 126, 384, 542, 0.95, 0]
         points = np.full((17, 3), [222, 334, keypoint_score], np.float32)
         points[5:7, 1] = 180
         points[13:15, 0] = 340
         raw[0, 0, 6:] = points.flatten()
-        target = self.bundle_dir / "yolo26n-pose.onnx"
+        target = self.bundle_dir / f"{selected['file']}.onnx"
         constant_graph(target, [1, 3, 640, 640], {"output0": raw})
+        graph = onnx.load(str(target))
+        graph.graph.name = f"synthetic-{name}"
+        onnx.save(graph, str(target))
         record = {
-            "model": yolo26_models.MODEL,
-            "url": yolo26_models.SOURCE_URL,
-            "sourceSha256": yolo26_models.SOURCE_SHA256,
+            "model": name,
+            "url": selected["url"],
+            "sourceSha256": selected["sourceSha256"],
             "sha256": models.digest(target),
             "inputSize": [640, 640],
             "outputShape": [1, 300, 57],
             "end2end": True,
         }
-        (self.bundle_dir / "yolo26n-pose.json").write_text(json.dumps(record))
+        (self.bundle_dir / f"{selected['file']}.json").write_text(json.dumps(record))
         return record
 
-    def test_nano_one_pass_pipeline_preserves_evidence_and_wrist_rules_in_both_modes(
+    def test_yolo26_one_pass_pipeline_preserves_evidence_and_wrist_rules_in_both_modes(
         self,
     ):
-        original = (self.model_dir / "manifest.json").read_bytes()
-        for mode in ("FULL_FRAME", "SEAT_FOCUS"):
-            for score in (1, 0.1):
-                with self.subTest(mode=mode, score=score):
-                    record = self.nano_model(score)
-                    output = self.root / "nano.json"
-                    config = {
-                        **self.config,
-                        "poseModel": "YOLO26_NANO_POSE",
-                        "detectionMode": mode,
-                        "wristTrial": True,
-                        "tabletopRegions": [
-                            {**self.config["regions"][0], "id": str(uuid4())}
-                        ],
-                    }
-                    with (
-                        patch.object(
-                            analyze,
-                            "CpuPose",
-                            side_effect=AssertionError("No per-person pose"),
-                        ),
-                        patch.object(
-                            analyze,
-                            "prepare_pose",
-                            side_effect=AssertionError("No RTMPose download"),
-                        ),
-                    ):
-                        analyze.analyze(
-                            self.source, config, output, self.root / "progress"
+        for name in yolo26_models.SPECS:
+            original = (self.model_dir / "manifest.json").read_bytes()
+            for mode in ("FULL_FRAME", "SEAT_FOCUS"):
+                for score in (1, 0.1):
+                    with self.subTest(model=name, mode=mode, score=score):
+                        other = next(
+                            model for model in yolo26_models.SPECS if model != name
                         )
-                    report = json.loads(output.read_text())
-                    self.assertEqual(report["poseModel"], "YOLO26_NANO_POSE")
-                    self.assertEqual(report["detectorModel"], "YOLO26_NANO_POSE")
-                    self.assertEqual(
-                        report["models"]["artifacts"],
-                        {"pose": record["sha256"], "detector": record["sha256"]},
-                    )
-                    self.assertEqual(
-                        report["evidencePolicy"],
-                        {
-                            "minDetectionScore": 0.35,
-                            "minKeypointScore": 0.4,
-                            "seatingSeconds": 5,
-                        },
-                    )
-                    self.assertEqual(
-                        report["wristPolicy"]["version"], "WRIST_SEAT_DWELL_V3"
-                    )
-                    self.assertEqual(len(report["events"]), int(score == 1))
-                    if score == 1:
-                        self.assertEqual(report["events"][0]["confirmedSeconds"], 5)
-                        self.assertIn(
-                            "PROBABLE", report["samples"][-1]["wristTables"].values()
-                        )
-                    else:
-                        self.assertTrue(
-                            all(
-                                p["evidence"] == "POSE_UNCERTAIN"
-                                for s in report["samples"]
-                                for p in s["people"]
+                        self.yolo26_model(other, 0.1 if score == 1 else 1)
+                        record = self.yolo26_model(name, score)
+                        output = self.root / "yolo26.json"
+                        config = {
+                            **self.config,
+                            "poseModel": name,
+                            "detectionMode": mode,
+                            "wristTrial": True,
+                            "tabletopRegions": [
+                                {**self.config["regions"][0], "id": str(uuid4())}
+                            ],
+                        }
+                        with (
+                            patch.object(
+                                analyze,
+                                "CpuPose",
+                                side_effect=AssertionError("No per-person pose"),
+                            ),
+                            patch.object(
+                                analyze,
+                                "prepare_pose",
+                                side_effect=AssertionError("No RTMPose download"),
+                            ),
+                        ):
+                            analyze.analyze(
+                                self.source, config, output, self.root / "progress"
                             )
+                        report = json.loads(output.read_text())
+                        self.assertEqual(report["poseModel"], name)
+                        self.assertEqual(report["detectorModel"], name)
+                        self.assertEqual(
+                            report["models"]["pose"], yolo26_models.spec(name)["label"]
                         )
-                        self.assertNotIn(
-                            "PROBABLE", report["samples"][-1]["wristTables"].values()
+                        self.assertEqual(
+                            report["models"]["artifacts"],
+                            {"pose": record["sha256"], "detector": record["sha256"]},
                         )
-                    self.assertTrue(
-                        all(s["detectedBoxes"] == 1 for s in report["samples"])
-                    )
-                    self.assertEqual(
-                        (self.model_dir / "manifest.json").read_bytes(), original
-                    )
+                        self.assertEqual(
+                            report["evidencePolicy"],
+                            {
+                                "minDetectionScore": 0.35,
+                                "minKeypointScore": 0.4,
+                                "seatingSeconds": 5,
+                            },
+                        )
+                        self.assertEqual(
+                            report["wristPolicy"]["version"], "WRIST_SEAT_DWELL_V3"
+                        )
+                        self.assertEqual(len(report["events"]), int(score == 1))
+                        if score == 1:
+                            self.assertEqual(report["events"][0]["confirmedSeconds"], 5)
+                            self.assertIn(
+                                "PROBABLE",
+                                report["samples"][-1]["wristTables"].values(),
+                            )
+                        else:
+                            self.assertTrue(
+                                all(
+                                    p["evidence"] == "POSE_UNCERTAIN"
+                                    for s in report["samples"]
+                                    for p in s["people"]
+                                )
+                            )
+                            self.assertNotIn(
+                                "PROBABLE",
+                                report["samples"][-1]["wristTables"].values(),
+                            )
+                        self.assertTrue(
+                            all(s["detectedBoxes"] == 1 for s in report["samples"])
+                        )
+                        self.assertEqual(
+                            (self.model_dir / "manifest.json").read_bytes(), original
+                        )
 
-    def test_nano_corrupt_or_wrong_bundle_fails_without_fallback(self):
-        self.nano_model()
-        target = self.bundle_dir / "yolo26n-pose.onnx"
-        target.write_bytes(b"corrupt")
-        with self.assertRaisesRegex(ValueError, "checksum"):
+    def test_yolo26_corrupt_or_wrong_bundle_fails_without_fallback(self):
+        for name in yolo26_models.SPECS:
+            self.yolo26_model(name)
+            target = self.bundle_dir / f"{yolo26_models.spec(name)['file']}.onnx"
+            target.write_bytes(b"corrupt")
+            with self.assertRaisesRegex(ValueError, "checksum"):
+                analyze.analyze(
+                    self.source,
+                    {**self.config, "poseModel": name},
+                    self.root / "out",
+                    self.root / "progress",
+                )
+            record = self.yolo26_model(name)
+            record["sourceSha256"] = "a" * 64
+            (self.bundle_dir / f"{yolo26_models.spec(name)['file']}.json").write_text(
+                json.dumps(record)
+            )
+            with self.assertRaisesRegex(ValueError, "provenance"):
+                yolo26_models.bundled_record(name)
+
+    def test_missing_small_never_uses_valid_nano_bundle(self):
+        nano = self.yolo26_model()
+        with self.assertRaises(FileNotFoundError):
             analyze.analyze(
                 self.source,
-                {**self.config, "poseModel": "YOLO26_NANO_POSE"},
+                {**self.config, "poseModel": "YOLO26_SMALL_POSE"},
                 self.root / "out",
                 self.root / "progress",
             )
-        record = self.nano_model()
-        record["sourceSha256"] = "a" * 64
-        (self.bundle_dir / "yolo26n-pose.json").write_text(json.dumps(record))
+        self.assertEqual(yolo26_models.bundled_record(), nano)
+        small = self.yolo26_model(yolo26_models.SMALL_MODEL)
+        self.assertNotEqual(nano["sha256"], small["sha256"])
+        # A valid Nano artifact's metadata cannot be relabeled as Small.
+        (self.bundle_dir / "yolo26s-pose.json").write_text(json.dumps(nano))
         with self.assertRaisesRegex(ValueError, "provenance"):
-            yolo26_models.bundled_record()
+            yolo26_models.bundled_record(yolo26_models.SMALL_MODEL)
+        self.assertEqual(yolo26_models.bundled_record(), nano)
 
-    def test_worker_runs_nano_in_real_child_process(self):
-        record = self.nano_model()
-        service.model_state["models"] = "READY"
-        with patch.object(service, "prepare_models"), TestClient(service.app) as client:
-            tenant = str(uuid4())
-            response = client.post(
-                f"/restaurants/{tenant}/jobs",
-                json={**self.config, "poseModel": "YOLO26_NANO_POSE"},
-            )
-            self.assertEqual(response.status_code, 202, response.text)
-            deadline = time.monotonic() + 30
-            while time.monotonic() < deadline:
-                job = client.get(
-                    f"/restaurants/{tenant}/jobs/{response.json()['id']}"
-                ).json()
-                if job["status"] != "RUNNING":
-                    break
-                time.sleep(0.1)
-            self.assertEqual(job["status"], "COMPLETED", job)
-            self.assertEqual(job["report"]["detectorModel"], "YOLO26_NANO_POSE")
-            self.assertEqual(
-                job["report"]["models"]["artifacts"]["pose"], record["sha256"]
-            )
+    def test_worker_runs_yolo26_in_real_child_process(self):
+        for name in yolo26_models.SPECS:
+            record = self.yolo26_model(name)
+            service.model_state["models"] = "READY"
+            with (
+                patch.object(service, "prepare_models"),
+                TestClient(service.app) as client,
+            ):
+                tenant = str(uuid4())
+                response = client.post(
+                    f"/restaurants/{tenant}/jobs",
+                    json={**self.config, "poseModel": name},
+                )
+                self.assertEqual(response.status_code, 202, response.text)
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    job = client.get(
+                        f"/restaurants/{tenant}/jobs/{response.json()['id']}"
+                    ).json()
+                    if job["status"] != "RUNNING":
+                        break
+                    time.sleep(0.1)
+                self.assertEqual(job["status"], "COMPLETED", job)
+                self.assertEqual(job["report"]["detectorModel"], name)
+                self.assertEqual(
+                    job["report"]["models"]["artifacts"]["pose"], record["sha256"]
+                )
 
     def test_actual_onnx_and_bytetrack_pipeline_preserves_video_time(self):
         output = self.root / "result.json"

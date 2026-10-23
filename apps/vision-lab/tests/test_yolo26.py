@@ -1,4 +1,4 @@
-"""Nano pose tensor semantics and preservation of each detection's own pose."""
+"""YOLO26 pose tensor semantics and preservation of each detection's own pose."""
 
 import os
 from pathlib import Path
@@ -11,8 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 import supervision as sv
 
-from analyze import NanoPoseDetector
+from analyze import Yolo26PoseDetector
 from focused_detection import detect_with_seat_focus
+import yolo26_models
 
 
 def predictions(*rows):
@@ -23,11 +24,20 @@ def predictions(*rows):
     return result
 
 
-class NanoPoseTests(unittest.TestCase):
+class Yolo26PoseTests(unittest.TestCase):
+    def test_only_the_two_fixed_pose_variants_are_accepted(self):
+        for name in ("YOLO26_LARGE_POSE", "https://example.invalid/model.onnx"):
+            with self.assertRaisesRegex(ValueError, "Unsupported YOLO26"):
+                yolo26_models.spec(name)
+        self.assertEqual(yolo26_models.spec("YOLO26_NANO_POSE")["file"], "yolo26n-pose")
+        self.assertEqual(
+            yolo26_models.spec("YOLO26_SMALL_POSE")["file"], "yolo26s-pose"
+        )
+
     def test_boxes_and_keypoints_share_letterbox_recovery(self):
         for shape in ((100, 200, 3), (200, 100, 3), (101, 203, 3)):
             with self.subTest(shape=shape):
-                _, ratio, left, top = NanoPoseDetector.preprocess(
+                _, ratio, left, top = Yolo26PoseDetector.preprocess(
                     np.zeros(shape, np.uint8)
                 )
                 box = [
@@ -37,7 +47,7 @@ class NanoPoseTests(unittest.TestCase):
                     70 * ratio + top,
                 ]
                 raw = predictions((box, 0.9, [50 * ratio + left, 40 * ratio + top]))
-                people = NanoPoseDetector.postprocess(raw, shape, ratio, left, top)
+                people = Yolo26PoseDetector.postprocess(raw, shape, ratio, left, top)
                 np.testing.assert_allclose(people.xyxy, [[30, 10, 70, 70]], atol=1e-4)
                 np.testing.assert_allclose(
                     people.data["keypoints"][0, :, :2], [[50, 40]] * 17, atol=1e-4
@@ -55,7 +65,7 @@ class NanoPoseTests(unittest.TestCase):
         raw[0, 6, 8] = -0.01
         raw[0, 7, 2] = 99
         raw[0, 8, 2] = 101
-        result = NanoPoseDetector.postprocess(raw, (640, 640, 3), 1, 0, 0)
+        result = Yolo26PoseDetector.postprocess(raw, (640, 640, 3), 1, 0, 0)
         self.assertEqual(len(result), 1)
         self.assertEqual(result.data["keypoints"].shape, (1, 17, 3))
 
@@ -65,7 +75,7 @@ class NanoPoseTests(unittest.TestCase):
             ([100, 100, 200, 280], 0.99, [155, 160]),
             ([300, 100, 400, 400], 0.8, [350, 250]),
         )
-        result = NanoPoseDetector.postprocess(raw, (640, 640, 3), 1, 0, 0)
+        result = Yolo26PoseDetector.postprocess(raw, (640, 640, 3), 1, 0, 0)
         np.testing.assert_allclose(result.confidence, [0.8, 0.7])
         np.testing.assert_allclose(
             result.data["keypoints"][:, 0, :2], [[350, 250], [150, 250]]
@@ -78,7 +88,7 @@ class NanoPoseTests(unittest.TestCase):
                 ([10, 10, 90, 200], 0.9 if step != 1 else 0.7, [50, 50 + step]),
                 ([200, 10, 280, 200], 0.8, [240, 70 + step]),
             ]
-            current = NanoPoseDetector.postprocess(
+            current = Yolo26PoseDetector.postprocess(
                 predictions(*rows), (640, 640, 3), 1, 0, 0
             )
             tracked = tracker.update_with_detections(current)
@@ -88,7 +98,7 @@ class NanoPoseTests(unittest.TestCase):
                     keypoints[0, :2],
                     [50, 50 + step] if box[0] < 100 else [240, 70 + step],
                 )
-        empty = NanoPoseDetector.postprocess(predictions(), (640, 640, 3), 1, 0, 0)
+        empty = Yolo26PoseDetector.postprocess(predictions(), (640, 640, 3), 1, 0, 0)
         self.assertEqual(len(tracker.update_with_detections(empty)), 0)
 
     def test_focused_detection_offsets_keypoints_and_keeps_selected_views_pose(self):
@@ -115,11 +125,11 @@ class NanoPoseTests(unittest.TestCase):
         np.testing.assert_allclose(result.data["keypoints"][0, 0], [460, 460, 0.8])
 
     def test_empty_output_and_incompatible_export_are_handled(self):
-        result = NanoPoseDetector.postprocess(predictions(), (640, 640, 3), 1, 0, 0)
+        result = Yolo26PoseDetector.postprocess(predictions(), (640, 640, 3), 1, 0, 0)
         self.assertEqual(result.data["keypoints"].shape, (0, 17, 3))
         for shape in ((1, 56, 8400), (1, 84, 8400), (1, 300, 56)):
-            with self.assertRaisesRegex(ValueError, "YOLO26n-Pose"):
-                NanoPoseDetector.postprocess(np.zeros(shape), (640, 640, 3), 1, 0, 0)
+            with self.assertRaisesRegex(ValueError, "YOLO26 pose"):
+                Yolo26PoseDetector.postprocess(np.zeros(shape), (640, 640, 3), 1, 0, 0)
 
 
 if __name__ == "__main__":

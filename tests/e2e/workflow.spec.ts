@@ -623,6 +623,22 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
   expect(submitted?.poseModel).toBe('YOLO26_NANO_POSE');
   expect(submitted?.detectionMode).toBe('FULL_FRAME');
   await expect(page.getByText(/سرعة معالجة المقطع: 3\.00×/)).toBeVisible();
+  await page
+    .getByRole('combobox', { name: 'نموذج تقدير الجلوس', exact: true })
+    .selectOption('YOLO26_SMALL_POSE');
+  await expect(page.getByText(/نموذج Small أكبر من Nano/)).toBeVisible();
+  await page.getByRole('button', { name: 'تحليل الفيديو على CPU', exact: true }).click();
+  await expect(
+    page.getByText('نموذج تقدير الجلوس في التقرير: YOLO26s-Pose', { exact: true }),
+  ).toBeVisible();
+  expect(submitted?.poseModel).toBe('YOLO26_SMALL_POSE');
+  expect(submitted?.detectionMode).toBe('FULL_FRAME');
+  await page
+    .getByRole('combobox', { name: 'نموذج تقدير الجلوس', exact: true })
+    .selectOption('YOLO26_NANO_POSE');
+  await expect(
+    page.getByText('نموذج تقدير الجلوس في التقرير: YOLO26s-Pose', { exact: true }),
+  ).toBeVisible();
   await importReport.setInputFiles({
     name: 'overlapping-seats.json',
     mimeType: 'application/json',

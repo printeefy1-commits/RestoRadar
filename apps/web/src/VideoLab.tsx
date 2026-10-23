@@ -640,7 +640,12 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
               <section className="panel">
                 <h2>تشغيل التحليل</h2>
                 <p className="muted">
-                  كاشف الأشخاص: {poseModel === 'YOLO26_NANO_POSE' ? 'YOLO26n-Pose' : 'YOLO11 Large'}
+                  كاشف الأشخاص:{' '}
+                  {poseModel === 'YOLO26_SMALL_POSE'
+                    ? 'YOLO26s-Pose'
+                    : poseModel === 'YOLO26_NANO_POSE'
+                      ? 'YOLO26n-Pose'
+                      : 'YOLO11 Large'}
                   . نعالج إطارين من زمن الفيديو في الثانية، ونتحقق من دليل جلوس مستمر لمدة 5 ثوانٍ.
                   ضعف وضوح مفاصل الجسم قد يمنع التأكيد.
                 </p>
@@ -673,15 +678,24 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                     <option value="YOLO26_NANO_POSE">
                       YOLO26n-Pose · كشف ومفاصل معًا · تجربة خفيفة
                     </option>
+                    <option value="YOLO26_SMALL_POSE">
+                      YOLO26s-Pose · أكبر من Nano · تجربة مقارنة
+                    </option>
                     <option value="RTMPOSE_TINY">YOLO11 Large + RTMPose الخفيف</option>
                     <option value="RTMPOSE_MEDIUM">نموذج أكبر · تجربة أبطأ</option>
                   </select>
                 </label>
-                {poseModel === 'YOLO26_NANO_POSE' && (
+                {(poseModel === 'YOLO26_NANO_POSE' || poseModel === 'YOLO26_SMALL_POSE') && (
                   <p className="muted">
                     يكشف الأشخاص ومفاصلهم بتمرير واحد لتقليل زمن المعالجة. ابدأ بالصورة الكاملة
                     وقارن النتيجة بالتقرير السابق. هذه تجربة مسجلة؛ لا تفعّل بث الكاميرا الحي، ولا
                     تضمن سرعة آنية أو دقة الجلوس.
+                  </p>
+                )}
+                {poseModel === 'YOLO26_SMALL_POSE' && (
+                  <p className="muted">
+                    نموذج Small أكبر من Nano وقد يستغرق وقتًا أطول. قارنه بالمناطق والفترة
+                    والإعدادات نفسها؛ لا يضمن رصدًا أفضل للأشخاص المحجوبين أو سرعة آنية.
                   </p>
                 )}
                 {poseModel === 'RTMPOSE_MEDIUM' && (
@@ -769,11 +783,13 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                     </p>
                     <p>
                       نموذج تقدير الجلوس في التقرير:{' '}
-                      {report.poseModel === 'YOLO26_NANO_POSE'
-                        ? 'YOLO26n-Pose'
-                        : report.poseModel === 'RTMPOSE_MEDIUM'
-                          ? 'النموذج الأكبر'
-                          : 'النموذج الخفيف'}
+                      {report.poseModel === 'YOLO26_SMALL_POSE'
+                        ? 'YOLO26s-Pose'
+                        : report.poseModel === 'YOLO26_NANO_POSE'
+                          ? 'YOLO26n-Pose'
+                          : report.poseModel === 'RTMPOSE_MEDIUM'
+                            ? 'النموذج الأكبر'
+                            : 'النموذج الخفيف'}
                     </p>
                     {report.processingSeconds > 0 && report.endSeconds > report.startSeconds && (
                       <p>

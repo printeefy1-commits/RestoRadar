@@ -18,7 +18,9 @@ export const videoTrialSchema = z
     startSeconds: z.number().min(0).max(86400),
     durationSeconds: z.number().int().min(6).max(120),
     detectionMode: z.enum(['FULL_FRAME', 'SEAT_FOCUS']).optional(),
-    poseModel: z.enum(['RTMPOSE_TINY', 'RTMPOSE_MEDIUM', 'YOLO26_NANO_POSE']).optional(),
+    poseModel: z
+      .enum(['RTMPOSE_TINY', 'RTMPOSE_MEDIUM', 'YOLO26_NANO_POSE', 'YOLO26_SMALL_POSE'])
+      .optional(),
     wristTrial: z.boolean().optional(),
     tabletopRegions: z.array(seatRegionSchema).max(40).optional(),
     regions: z.array(seatRegionSchema).min(1).max(40),
@@ -106,10 +108,10 @@ export interface TrialPerson {
 export interface TrialReport {
   mode: 'RECORDED_VIDEO_DRY_RUN';
   detectionMode?: 'FULL_FRAME' | 'SEAT_FOCUS';
-  poseModel?: 'RTMPOSE_TINY' | 'RTMPOSE_MEDIUM' | 'YOLO26_NANO_POSE';
+  poseModel?: 'RTMPOSE_TINY' | 'RTMPOSE_MEDIUM' | 'YOLO26_NANO_POSE' | 'YOLO26_SMALL_POSE';
   focusMergePolicy?: 'ALIGNED_CONTAINMENT_V1';
   sourceId: string;
-  detectorModel?: 'YOLO11_LARGE' | 'YOLO26_NANO_POSE';
+  detectorModel?: 'YOLO11_LARGE' | 'YOLO26_NANO_POSE' | 'YOLO26_SMALL_POSE';
   personMergePolicy?: 'STRICT_UPPER_BODY_ALIGNMENT_V1';
   models: { detector: string; pose: string; tracker: string; artifacts: Record<string, string> };
   startSeconds: number;

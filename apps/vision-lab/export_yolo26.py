@@ -1,4 +1,4 @@
-"""Export the pinned Nano pose model without adding PyTorch to production."""
+"""Export a pinned Nano/Small pose model without PyTorch in production."""
 
 import importlib.metadata
 import json
@@ -8,14 +8,15 @@ import sys
 import urllib.request
 
 from models import digest
-from yolo26_models import EXPORTER_VERSION, MODEL, SOURCE_SHA256, SOURCE_URL
+from yolo26_models import EXPORTER_VERSION, MODEL, spec
 
 
-def export(destination):
+def export(destination, name=MODEL):
     import onnx
     import torch
     from ultralytics import YOLO
 
+    selected = spec(name)
     for package, expected in (
         ("ultralytics", EXPORTER_VERSION),
         ("torch", "2.8.0+cpu"),
@@ -26,31 +27,31 @@ def export(destination):
     torch.set_num_threads(2)
     torch.set_num_interop_threads(1)
     destination.mkdir(parents=True, exist_ok=True)
-    weights = destination / "yolo26n-pose.pt"
+    weights = destination / f"{selected['file']}.pt"
     if not weights.exists():
         temporary = destination / "weights.tmp"
-        with urllib.request.urlopen(SOURCE_URL, timeout=60) as src, temporary.open(
+        with urllib.request.urlopen(selected["url"], timeout=60) as src, temporary.open(
             "wb"
         ) as dst:
             total = 0
             while chunk := src.read(1024 * 1024):
                 total += len(chunk)
-                if total > 20 * 1024 * 1024:
-                    raise ValueError("Nano pose download exceeds limit")
+                if total > selected["maxBytes"]:
+                    raise ValueError("YOLO26 pose download exceeds limit")
                 dst.write(chunk)
-        if digest(temporary) != SOURCE_SHA256:
-            raise ValueError("YOLO26n-Pose source checksum mismatch")
+        if digest(temporary) != selected["sourceSha256"]:
+            raise ValueError("YOLO26 pose source checksum mismatch")
         temporary.replace(weights)
-    if digest(weights) != SOURCE_SHA256:
-        raise ValueError("YOLO26n-Pose source checksum mismatch")
+    if digest(weights) != selected["sourceSha256"]:
+        raise ValueError("YOLO26 pose source checksum mismatch")
     model = YOLO(str(weights), task="pose")
     parameters = sum(p.numel() for p in model.model.parameters())
     if (
-        not 2_000_000 <= parameters < 4_000_000
+        not selected["minParameters"] <= parameters < selected["maxParameters"]
         or model.names != {0: "person"}
         or list(model.model.model[-1].kpt_shape) != [17, 3]
     ):
-        raise ValueError("Expected the Nano YOLO26 COCO pose model")
+        raise ValueError(f"Unexpected YOLO26 COCO pose model: {name}")
     output = Path(
         model.export(
             format="onnx",
@@ -78,11 +79,11 @@ def export(destination):
         or len(graph.graph.output) != 1
         or shape(graph.graph.output[0]) != [1, 300, 57]
     ):
-        raise ValueError("Unexpected YOLO26n-Pose ONNX interface")
+        raise ValueError("Unexpected YOLO26 pose ONNX interface")
     record = {
-        "model": MODEL,
-        "url": SOURCE_URL,
-        "sourceSha256": SOURCE_SHA256,
+        "model": name,
+        "url": selected["url"],
+        "sourceSha256": selected["sourceSha256"],
         "sha256": digest(output),
         "parameters": parameters,
         "exporter": f"ultralytics {EXPORTER_VERSION} / torch 2.8.0+cpu / onnx 1.18.0",
@@ -97,9 +98,9 @@ def export(destination):
     shutil.copyfile(
         distribution.locate_file(license_path), destination / "YOLO26-LICENSE"
     )
-    (destination / "yolo26n-pose.json").write_text(json.dumps(record, indent=2))
+    (destination / f"{selected['file']}.json").write_text(json.dumps(record, indent=2))
     print(json.dumps(record, indent=2))
 
 
 if __name__ == "__main__":
-    export(Path(sys.argv[1]))
+    export(Path(sys.argv[1]), sys.argv[2] if len(sys.argv) > 2 else MODEL)

@@ -52,9 +52,9 @@ class Trial(BaseModel):
     durationSeconds: int = Field(ge=6, le=120)
     regions: list[Region] = Field(min_length=1, max_length=40)
     detectionMode: Literal["FULL_FRAME", "SEAT_FOCUS"] = "FULL_FRAME"
-    poseModel: Literal["RTMPOSE_TINY", "RTMPOSE_MEDIUM", "YOLO26_NANO_POSE"] = (
-        "RTMPOSE_TINY"
-    )
+    poseModel: Literal[
+        "RTMPOSE_TINY", "RTMPOSE_MEDIUM", "YOLO26_NANO_POSE", "YOLO26_SMALL_POSE"
+    ] = "RTMPOSE_TINY"
     wristTrial: bool = Field(default=False, strict=True)
     tabletopRegions: list[Region] = Field(default_factory=list, max_length=40)
 

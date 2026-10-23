@@ -21,14 +21,12 @@ RUN --mount=type=secret,id=build_ca,required=false \
     && python export_detector.py /export
 
 FROM detector-export AS yolo26-export
-COPY apps/vision-lab/requirements-yolo26-export.txt ./
+COPY apps/vision-lab/requirements-yolo26-export.txt apps/vision-lab/export_yolo26.py apps/vision-lab/yolo26_models.py ./
 RUN --mount=type=secret,id=build_ca,required=false \
-    if [ -s /run/secrets/build_ca ]; then export PIP_CERT=/run/secrets/build_ca; fi \
-    && pip install --no-cache-dir -r requirements-yolo26-export.txt
-COPY apps/vision-lab/export_yolo26.py apps/vision-lab/yolo26_models.py ./
-RUN --mount=type=secret,id=build_ca,required=false \
-    if [ -s /run/secrets/build_ca ]; then export SSL_CERT_FILE=/run/secrets/build_ca; fi \
-    && python export_yolo26.py /export26
+    if [ -s /run/secrets/build_ca ]; then export PIP_CERT=/run/secrets/build_ca SSL_CERT_FILE=/run/secrets/build_ca; fi \
+    && pip install --no-cache-dir -r requirements-yolo26-export.txt \
+    && python export_yolo26.py /export26 \
+    && python export_yolo26.py /export26 YOLO26_SMALL_POSE
 
 FROM base AS runtime
 COPY apps/vision-lab/requirements.txt ./
@@ -37,7 +35,7 @@ RUN --mount=type=secret,id=build_ca,required=false \
       PIP_CERT=/run/secrets/build_ca pip install --no-cache-dir -r requirements.txt; \
     else pip install --no-cache-dir -r requirements.txt; fi
 COPY --from=detector-export /export/yolo11l.onnx /export/detector.json /export/ULTRALYTICS-LICENSE /opt/restoradar-detector/
-COPY --from=yolo26-export /export26/yolo26n-pose.onnx /export26/yolo26n-pose.json /export26/YOLO26-LICENSE /opt/restoradar-detector/
+COPY --from=yolo26-export /export26/yolo26n-pose.onnx /export26/yolo26n-pose.json /export26/yolo26s-pose.onnx /export26/yolo26s-pose.json /export26/YOLO26-LICENSE /opt/restoradar-detector/
 COPY --chown=10001:10001 apps/vision-lab/*.py ./
 RUN useradd --uid 10001 --create-home vision && mkdir /models && chown vision:vision /models
 USER vision

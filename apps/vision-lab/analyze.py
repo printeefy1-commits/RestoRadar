@@ -161,7 +161,7 @@ class PersonDetector:
         return self.postprocess(outputs[0], frame.shape, ratio, left, top)
 
 
-class NanoPoseDetector(PersonDetector):
+class Yolo26PoseDetector(PersonDetector):
     """One end-to-end pass returns boxes and their own 17 COCO keypoints."""
 
     def __init__(self, path):
@@ -180,13 +180,13 @@ class NanoPoseDetector(PersonDetector):
             or outputs[0].shape != [1, 300, 57]
             or outputs[0].type != "tensor(float)"
         ):
-            raise ValueError("Unsupported YOLO26n-Pose interface")
+            raise ValueError("Unsupported YOLO26 pose interface")
         self.input = inputs[0]
 
     @staticmethod
     def postprocess(predictions, frame_shape, ratio, left, top):
         if predictions.shape != (1, 300, 57):
-            raise ValueError("Unsupported YOLO26n-Pose output")
+            raise ValueError("Unsupported YOLO26 pose output")
         # End-to-end export: xyxy, person score, class id, 17*(x,y,score).
         rows = predictions[0]
         rows = rows[
@@ -228,8 +228,10 @@ def atomic_json(path, value):
 def analyze(source, config, output, progress):
     started = time.monotonic()
     pose_model = config.get("poseModel", "RTMPOSE_TINY")
-    nano = pose_model == yolo26_models.MODEL
-    selected_pose = {"label": yolo26_models.LABEL} if nano else pose_spec(pose_model)
+    single_pass = pose_model in yolo26_models.SPECS
+    selected_pose = (
+        yolo26_models.spec(pose_model) if single_pass else pose_spec(pose_model)
+    )
     detection_mode = config.get("detectionMode", "FULL_FRAME")
     if detection_mode not in ("FULL_FRAME", "SEAT_FOCUS"):
         raise ValueError("Unsupported detection mode")
@@ -239,10 +241,10 @@ def analyze(source, config, output, progress):
     ):
         raise ValueError("Focused detection supports at most four tables per trial")
     atomic_json(progress, {"progress": 0, "phase": "PREPARING_POSE"})
-    if nano:
-        pose_record = yolo26_models.bundled_record()
+    if single_pass:
+        pose_record = yolo26_models.bundled_record(pose_model)
         artifacts = {"detector": pose_record}
-        detector = NanoPoseDetector(yolo26_models.artifact_path())
+        detector = Yolo26PoseDetector(yolo26_models.artifact_path(pose_model))
         pose = None
     else:
         artifacts = manifest()
@@ -311,7 +313,7 @@ def analyze(source, config, output, progress):
                 tracked = tracker.update_with_detections(detections)
                 if len(tracked):
                     # Never call RTMPose with an empty bbox array: it would infer on the whole frame.
-                    if nano:
+                    if single_pass:
                         # ByteTrack slices the current detections and their data
                         # together. No nearest-box remapping or stale pose reuse.
                         keypoints = tracked.data["keypoints"]
@@ -428,11 +430,15 @@ def analyze(source, config, output, progress):
         "mode": "RECORDED_VIDEO_DRY_RUN",
         "detectionMode": detection_mode,
         "poseModel": pose_model,
-        "detectorModel": yolo26_models.MODEL if nano else "YOLO11_LARGE",
+        "detectorModel": pose_model if single_pass else "YOLO11_LARGE",
         "personMergePolicy": PERSON_MERGE_POLICY,
         "sourceId": config["sourceId"],
         "models": {
-            "detector": yolo26_models.LABEL if nano else "YOLO11l (COCO ONNX, 640x640)",
+            "detector": (
+                selected_pose["label"]
+                if single_pass
+                else "YOLO11l (COCO ONNX, 640x640)"
+            ),
             "pose": selected_pose["label"],
             "tracker": "ByteTrack (supervision 0.25.1)",
             "artifacts": {
