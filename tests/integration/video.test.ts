@@ -62,7 +62,7 @@ beforeAll(async () => {
       tabletopRegions?: unknown[];
     };
     expect(['FULL_FRAME', 'SEAT_FOCUS', undefined]).toContain(detectionMode);
-    expect(['RTMPOSE_TINY', 'RTMPOSE_MEDIUM', undefined]).toContain(poseModel);
+    expect(['RTMPOSE_TINY', 'RTMPOSE_MEDIUM', 'YOLO26_NANO_POSE', undefined]).toContain(poseModel);
     expect(request.body).toEqual({
       ...trial,
       ...(detectionMode === undefined ? {} : { detectionMode }),
@@ -210,6 +210,8 @@ describe('owner-only recorded-video gateway', () => {
       { detectionMode: 'SEAT_FOCUS' },
       { poseModel: 'RTMPOSE_TINY' },
       { poseModel: 'RTMPOSE_MEDIUM' },
+      { poseModel: 'YOLO26_NANO_POSE' },
+      { detectionMode: 'SEAT_FOCUS', poseModel: 'YOLO26_NANO_POSE' },
       { detectionMode: 'SEAT_FOCUS', poseModel: 'RTMPOSE_MEDIUM' },
     ])
       expect((await send(valid)).statusCode).toBe(202);

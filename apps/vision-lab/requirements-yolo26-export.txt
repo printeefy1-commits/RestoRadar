@@ -1,0 +1,5 @@
+# Build only. CPU PyTorch is inherited from the existing detector export stage.
+ultralytics==8.4.184
+onnx==1.18.0
+numpy==2.2.6
+opencv-python==4.11.0.86

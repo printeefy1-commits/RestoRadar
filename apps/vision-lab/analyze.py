@@ -27,6 +27,7 @@ from focused_detection import (
 )
 from wrist_trial import WRIST_POLICY, WristTrial, wrist_observation
 from person_duplicates import PERSON_MERGE_POLICY, suppress_aligned_torsos
+import yolo26_models
 
 
 class CpuPose(RTMPose):
@@ -160,6 +161,64 @@ class PersonDetector:
         return self.postprocess(outputs[0], frame.shape, ratio, left, top)
 
 
+class NanoPoseDetector(PersonDetector):
+    """One end-to-end pass returns boxes and their own 17 COCO keypoints."""
+
+    def __init__(self, path):
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = 2
+        options.inter_op_num_threads = 1
+        self.session = ort.InferenceSession(
+            str(path), sess_options=options, providers=["CPUExecutionProvider"]
+        )
+        inputs, outputs = self.session.get_inputs(), self.session.get_outputs()
+        if (
+            len(inputs) != 1
+            or inputs[0].shape != [1, 3, 640, 640]
+            or inputs[0].type != "tensor(float)"
+            or len(outputs) != 1
+            or outputs[0].shape != [1, 300, 57]
+            or outputs[0].type != "tensor(float)"
+        ):
+            raise ValueError("Unsupported YOLO26n-Pose interface")
+        self.input = inputs[0]
+
+    @staticmethod
+    def postprocess(predictions, frame_shape, ratio, left, top):
+        if predictions.shape != (1, 300, 57):
+            raise ValueError("Unsupported YOLO26n-Pose output")
+        # End-to-end export: xyxy, person score, class id, 17*(x,y,score).
+        rows = predictions[0]
+        rows = rows[
+            np.isfinite(rows).all(axis=1)
+            & (rows[:, 5] == 0)
+            & (rows[:, 4] >= 0.1)
+            & (rows[:, 4] <= 1)
+            & (rows[:, 2] > rows[:, 0])
+            & (rows[:, 3] > rows[:, 1])
+        ]
+        boxes = rows[:, :4].copy()
+        points = rows[:, 6:].copy().reshape(-1, 17, 3)
+        boxes[:, [0, 2]] = np.clip((boxes[:, [0, 2]] - left) / ratio, 0, frame_shape[1])
+        boxes[:, [1, 3]] = np.clip((boxes[:, [1, 3]] - top) / ratio, 0, frame_shape[0])
+        points[:, :, 0] = np.clip((points[:, :, 0] - left) / ratio, 0, frame_shape[1])
+        points[:, :, 1] = np.clip((points[:, :, 1] - top) / ratio, 0, frame_shape[0])
+        valid = (
+            ((boxes[:, 2] - boxes[:, 0]) >= 3)
+            & ((boxes[:, 3] - boxes[:, 1]) >= 3)
+            & (points[:, :, 2] >= 0).all(axis=1)
+            & (points[:, :, 2] <= 1).all(axis=1)
+        )
+        detected = sv.Detections(
+            xyxy=boxes[valid],
+            confidence=rows[valid, 4].copy(),
+            class_id=np.zeros(int(valid.sum()), dtype=int),
+            data={"keypoints": points[valid]},
+        )
+        detected = suppress_aligned_torsos(detected)
+        return detected[np.argsort(-detected.confidence, kind="stable")[:30]]
+
+
 def atomic_json(path, value):
     temporary = Path(str(path) + ".tmp")
     temporary.write_text(json.dumps(value, allow_nan=False))
@@ -169,7 +228,8 @@ def atomic_json(path, value):
 def analyze(source, config, output, progress):
     started = time.monotonic()
     pose_model = config.get("poseModel", "RTMPOSE_TINY")
-    selected_pose = pose_spec(pose_model)
+    nano = pose_model == yolo26_models.MODEL
+    selected_pose = {"label": yolo26_models.LABEL} if nano else pose_spec(pose_model)
     detection_mode = config.get("detectionMode", "FULL_FRAME")
     if detection_mode not in ("FULL_FRAME", "SEAT_FOCUS"):
         raise ValueError("Unsupported detection mode")
@@ -178,13 +238,19 @@ def analyze(source, config, output, progress):
         and len({r["tableId"] for r in config["regions"]}) > MAX_FOCUS_TABLES
     ):
         raise ValueError("Focused detection supports at most four tables per trial")
-    artifacts = manifest()
-    if not artifacts:
-        raise ValueError("Model artifacts are missing or have changed")
     atomic_json(progress, {"progress": 0, "phase": "PREPARING_POSE"})
-    pose_record = prepare_pose(pose_model)
-    detector = PersonDetector(MODEL_DIR / "detector.onnx")
-    pose = CpuPose(MODEL_DIR / f"{selected_pose['file']}.onnx")
+    if nano:
+        pose_record = yolo26_models.bundled_record()
+        artifacts = {"detector": pose_record}
+        detector = NanoPoseDetector(yolo26_models.artifact_path())
+        pose = None
+    else:
+        artifacts = manifest()
+        if not artifacts:
+            raise ValueError("Model artifacts are missing or have changed")
+        pose_record = prepare_pose(pose_model)
+        detector = PersonDetector(MODEL_DIR / "detector.onnx")
+        pose = CpuPose(MODEL_DIR / f"{selected_pose['file']}.onnx")
     atomic_json(progress, {"progress": 0, "phase": "ANALYZING"})
     tracker = sv.ByteTrack(
         track_activation_threshold=MIN_DETECTION_SCORE,
@@ -245,7 +311,13 @@ def analyze(source, config, output, progress):
                 tracked = tracker.update_with_detections(detections)
                 if len(tracked):
                     # Never call RTMPose with an empty bbox array: it would infer on the whole frame.
-                    points, scores = pose(frame, bboxes=tracked.xyxy)
+                    if nano:
+                        # ByteTrack slices the current detections and their data
+                        # together. No nearest-box remapping or stale pose reuse.
+                        keypoints = tracked.data["keypoints"]
+                        points, scores = keypoints[:, :, :2], keypoints[:, :, 2]
+                    else:
+                        points, scores = pose(frame, bboxes=tracked.xyxy)
                     for i, box in enumerate(tracked.xyxy):
                         anchor = seated_anchor(points[i], scores[i])
                         score = float(tracked.confidence[i])
@@ -356,11 +428,11 @@ def analyze(source, config, output, progress):
         "mode": "RECORDED_VIDEO_DRY_RUN",
         "detectionMode": detection_mode,
         "poseModel": pose_model,
-        "detectorModel": "YOLO11_LARGE",
+        "detectorModel": yolo26_models.MODEL if nano else "YOLO11_LARGE",
         "personMergePolicy": PERSON_MERGE_POLICY,
         "sourceId": config["sourceId"],
         "models": {
-            "detector": "YOLO11l (COCO ONNX, 640x640)",
+            "detector": yolo26_models.LABEL if nano else "YOLO11l (COCO ONNX, 640x640)",
             "pose": selected_pose["label"],
             "tracker": "ByteTrack (supervision 0.25.1)",
             "artifacts": {

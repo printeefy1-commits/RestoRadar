@@ -484,7 +484,7 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
   await expect(page.getByRole('button', { name: 'حذف سطح الطاولة 1', exact: true })).toBeVisible();
   await expect(page.getByLabel('طريقة رصد الأشخاص')).toHaveValue('FULL_FRAME');
   await expect(page.getByRole('combobox', { name: 'نموذج تقدير الجلوس', exact: true })).toHaveValue(
-    'RTMPOSE_TINY',
+    'YOLO26_NANO_POSE',
   );
   await page.getByLabel('طريقة رصد الأشخاص').selectOption('SEAT_FOCUS');
   await page
@@ -612,6 +612,17 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
   const downloadPromise = page.waitForEvent('download');
   await page.getByRole('button', { name: 'تنزيل تقرير التجربة JSON', exact: true }).click();
   expect((await downloadPromise).suggestedFilename()).toBe('restoradar-video-trial.json');
+  await page.getByLabel('طريقة رصد الأشخاص').selectOption('FULL_FRAME');
+  await page
+    .getByRole('combobox', { name: 'نموذج تقدير الجلوس', exact: true })
+    .selectOption('YOLO26_NANO_POSE');
+  await page.getByRole('button', { name: 'تحليل الفيديو على CPU', exact: true }).click();
+  await expect(
+    page.getByText('نموذج تقدير الجلوس في التقرير: YOLO26n-Pose', { exact: true }),
+  ).toBeVisible();
+  expect(submitted?.poseModel).toBe('YOLO26_NANO_POSE');
+  expect(submitted?.detectionMode).toBe('FULL_FRAME');
+  await expect(page.getByText(/سرعة معالجة المقطع: 3\.00×/)).toBeVisible();
   await importReport.setInputFiles({
     name: 'overlapping-seats.json',
     mimeType: 'application/json',

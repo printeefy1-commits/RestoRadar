@@ -94,11 +94,16 @@ def detect_with_seat_focus(detector, frame, regions):
         boxes = detected.xyxy.copy()
         boxes[:, [0, 2]] += x1
         boxes[:, [1, 3]] += y1
+        data = {key: value.copy() for key, value in detected.data.items()}
+        if "keypoints" in data:
+            data["keypoints"][:, :, 0] += x1
+            data["keypoints"][:, :, 1] += y1
         parts.append(
             sv.Detections(
                 xyxy=boxes,
                 confidence=detected.confidence,
                 class_id=detected.class_id,
+                data=data,
             )
         )
     return merge_views(parts), len(crops)

@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { SeatRegion, Table, TrialJob, VideoLabStatus } from '@restoradar/contracts';
+import type {
+  SeatRegion,
+  Table,
+  TrialJob,
+  VideoLabStatus,
+  VideoTrial,
+} from '@restoradar/contracts';
 import { seatRegionSchema } from '@restoradar/contracts';
 import { evidenceLabels, trialEvidence, wristReasonLabels } from './video-evidence.ts';
 
@@ -46,7 +52,8 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
   const [startSeconds, setStartSeconds] = useState(0);
   const [durationSeconds, setDurationSeconds] = useState(60);
   const [detectionMode, setDetectionMode] = useState<'FULL_FRAME' | 'SEAT_FOCUS'>('FULL_FRAME');
-  const [poseModel, setPoseModel] = useState<'RTMPOSE_TINY' | 'RTMPOSE_MEDIUM'>('RTMPOSE_TINY');
+  const [poseModel, setPoseModel] =
+    useState<NonNullable<VideoTrial['poseModel']>>('YOLO26_NANO_POSE');
   const video = useRef<HTMLVideoElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const sourceId = useRef<string | null>(null);
@@ -633,8 +640,9 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
               <section className="panel">
                 <h2>تشغيل التحليل</h2>
                 <p className="muted">
-                  كاشف الأشخاص: YOLO11 Large. نعالج إطارين من زمن الفيديو في الثانية، ونتحقق من دليل
-                  جلوس مستمر لمدة 5 ثوانٍ. ضعف وضوح مفاصل الجسم قد يمنع التأكيد.
+                  كاشف الأشخاص: {poseModel === 'YOLO26_NANO_POSE' ? 'YOLO26n-Pose' : 'YOLO11 Large'}
+                  . نعالج إطارين من زمن الفيديو في الثانية، ونتحقق من دليل جلوس مستمر لمدة 5 ثوانٍ.
+                  ضعف وضوح مفاصل الجسم قد يمنع التأكيد.
                 </p>
                 <label>
                   طريقة رصد الأشخاص
@@ -662,10 +670,20 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                     value={poseModel}
                     onChange={(event) => setPoseModel(event.target.value as typeof poseModel)}
                   >
-                    <option value="RTMPOSE_TINY">النموذج الخفيف الحالي</option>
+                    <option value="YOLO26_NANO_POSE">
+                      YOLO26n-Pose · كشف ومفاصل معًا · تجربة خفيفة
+                    </option>
+                    <option value="RTMPOSE_TINY">YOLO11 Large + RTMPose الخفيف</option>
                     <option value="RTMPOSE_MEDIUM">نموذج أكبر · تجربة أبطأ</option>
                   </select>
                 </label>
+                {poseModel === 'YOLO26_NANO_POSE' && (
+                  <p className="muted">
+                    يكشف الأشخاص ومفاصلهم بتمرير واحد لتقليل زمن المعالجة. ابدأ بالصورة الكاملة
+                    وقارن النتيجة بالتقرير السابق. هذه تجربة مسجلة؛ لا تفعّل بث الكاميرا الحي، ولا
+                    تضمن سرعة آنية أو دقة الجلوس.
+                  </p>
+                )}
                 {poseModel === 'RTMPOSE_MEDIUM' && (
                   <p className="muted">
                     يُنزّل النموذج الأكبر عند أول تشغيل له، وقد يستغرق التنزيل والتحليل وقتًا
@@ -751,8 +769,23 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                     </p>
                     <p>
                       نموذج تقدير الجلوس في التقرير:{' '}
-                      {report.poseModel === 'RTMPOSE_MEDIUM' ? 'النموذج الأكبر' : 'النموذج الخفيف'}
+                      {report.poseModel === 'YOLO26_NANO_POSE'
+                        ? 'YOLO26n-Pose'
+                        : report.poseModel === 'RTMPOSE_MEDIUM'
+                          ? 'النموذج الأكبر'
+                          : 'النموذج الخفيف'}
                     </p>
+                    {report.processingSeconds > 0 && report.endSeconds > report.startSeconds && (
+                      <p>
+                        سرعة معالجة المقطع:{' '}
+                        {(
+                          (report.endSeconds - report.startSeconds) /
+                          report.processingSeconds
+                        ).toFixed(2)}
+                        × من الزمن الحقيقي. قيمة 1 أو أكثر تعني أن معالجة هذه التجربة استغرقت زمنًا
+                        لا يزيد على مدة المقطع؛ يشمل القياس تجهيز النموذج وفك الفيديو.
+                      </p>
+                    )}
                     <p>
                       عولجت {report.analyzedSamples} عينة خلال {report.processingSeconds.toFixed(1)}{' '}
                       ثانية.
