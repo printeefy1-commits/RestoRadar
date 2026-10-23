@@ -71,6 +71,10 @@ export interface WristEvidence {
   seatRegionId: string | null;
   bodyAnchor: [number, number] | null;
   anchorSource: 'HIP' | 'BOX_CENTER' | null;
+  motionAnchor?: [number, number] | null;
+  motionSource?: 'SHOULDERS' | 'BOX_CENTER' | null;
+  seatRegionCandidates?: string[];
+  seatResolution?: 'DIRECT' | 'CONTINUITY' | null;
   stableSeconds: number;
 }
 export interface TrialPerson {
@@ -116,7 +120,9 @@ export interface TrialReport {
   wristTrial?: boolean;
   tabletopRegions?: SeatRegion[];
   wristPolicy?: {
-    version: 'WRIST_SEAT_DWELL_V1';
+    version: 'WRIST_SEAT_DWELL_V1' | 'WRIST_SEAT_DWELL_V2';
+    motionReference?: 'SHOULDERS_THEN_BOX_CENTER';
+    overlapResolution?: 'PREVIOUS_SEAT_WHILE_STATIONARY';
     seconds: number;
     minKeypointScore: number;
     maxDriftBoxWidths: number;

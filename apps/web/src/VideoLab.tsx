@@ -54,6 +54,15 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
   const running = busy || job?.status === 'RUNNING';
   const tabletopDrawing = wristTrial && regionKind === 'TABLETOP';
   const drawingRegions = tabletopDrawing ? tabletopRegions : regions;
+  const overlappingSeats = regions.some((a, index) =>
+    regions
+      .slice(index + 1)
+      .some(
+        (b) =>
+          Math.max(a.x, b.x) < Math.min(a.x + a.width, b.x + b.width) &&
+          Math.max(a.y, b.y) < Math.min(a.y + a.height, b.y + b.height),
+      ),
+  );
   const appendRegion = (region: SeatRegion) => {
     if (tabletopDrawing) setTabletopRegions((old) => [...old, region]);
     else setRegions((old) => [...old, region]);
@@ -469,6 +478,12 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                       الطاولة وجسم ثابت قرب المقعد لخمس ثوانٍ. النتيجة إشغال مرجّح؛ لا تثبت ملامسة
                       الطاولة أو الجلوس، وقد تشمل واقفًا محجوبًا.
                     </p>
+                    {overlappingSeats && (
+                      <p role="status">
+                        توجد مناطق مقاعد متداخلة. حاول فصلها حول مواضع الأجسام؛ قد تبقى إشارة
+                        المعصمين غير محسومة عند التداخل.
+                      </p>
+                    )}
                     <label>
                       نوع المنطقة
                       <select
@@ -818,6 +833,8 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                                     {person.wristEvidence.tableId &&
                                       ` · ${tableName(person.wristEvidence.tableId)}`}{' '}
                                     · ثبات {person.wristEvidence.stableSeconds.toFixed(1)} ثانية
+                                    {person.wristEvidence.seatResolution === 'CONTINUITY' &&
+                                      ' · احتُفظ بالمقعد السابق مع ثبات الجسم'}
                                     {person.wristEvidence.anchorSource === 'BOX_CENTER' &&
                                       ' · موضع الجسم من مركز الصندوق بسبب ضعف الحوض'}
                                   </p>

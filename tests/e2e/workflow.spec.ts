@@ -612,6 +612,20 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
   const downloadPromise = page.waitForEvent('download');
   await page.getByRole('button', { name: 'تنزيل تقرير التجربة JSON', exact: true }).click();
   expect((await downloadPromise).suggestedFilename()).toBe('restoradar-video-trial.json');
+  await importReport.setInputFiles({
+    name: 'overlapping-seats.json',
+    mimeType: 'application/json',
+    buffer: Buffer.from(
+      JSON.stringify({
+        sourceId,
+        regions: [submitted!.regions[0], { ...submitted!.regions[0], id: randomUUID() }],
+      }),
+    ),
+  });
+  const overlapNotice = page.getByText(/توجد مناطق مقاعد متداخلة/);
+  await expect(overlapNotice).toBeVisible();
+  await page.getByRole('button', { name: 'حذف المنطقة 2', exact: true }).click();
+  await expect(overlapNotice).toHaveCount(0);
   const after = await (
     await page.request.get(`${address}/api/restaurants/${restaurantId}/dashboard`)
   ).json();

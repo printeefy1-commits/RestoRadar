@@ -6,7 +6,9 @@ from collections import Counter
 from decisions import MIN_DETECTION_SCORE, MIN_KEYPOINT_SCORE, matching_tables
 
 WRIST_POLICY = {
-    "version": "WRIST_SEAT_DWELL_V1",
+    "version": "WRIST_SEAT_DWELL_V2",
+    "motionReference": "SHOULDERS_THEN_BOX_CENTER",
+    "overlapResolution": "PREVIOUS_SEAT_WHILE_STATIONARY",
     "seconds": 5,
     "minKeypointScore": MIN_KEYPOINT_SCORE,
     "maxDriftBoxWidths": 0.25,
@@ -45,6 +47,10 @@ def wrist_observation(points, scores, box, track_id, score, seats, tops, width, 
         "seatRegionId": None,
         "bodyAnchor": None,
         "anchorSource": None,
+        "motionAnchor": None,
+        "motionSource": None,
+        "seatRegionCandidates": [],
+        "seatResolution": None,
         "stableSeconds": 0,
     }
     if track_id is None:
@@ -74,13 +80,61 @@ def wrist_observation(points, scores, box, track_id, score, seats, tops, width, 
         bodyAnchor=[float(anchor[0] / width), float(anchor[1] / height)],
         anchorSource="HIP" if hips else "BOX_CENTER",
     )
+    # Motion and seat mapping have different references. Stable shoulders
+    # survive a full-body/torso box change and a fluctuating hip score.
+    shoulders = all(reliable(points, scores, i) for i in (5, 6))
+    motion = (
+        [(float(points[5][i]) + float(points[6][i])) / 2 for i in (0, 1)]
+        if shoulders
+        else [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2]
+    )
+    result.update(
+        motionAnchor=[float(motion[0] / width), float(motion[1] / height)],
+        motionSource="SHOULDERS" if shoulders else "BOX_CENTER",
+    )
     matches = [r for r in seats if matching_tables(anchor, [r], width, height)]
+    # Mixed-table ambiguity must never be resolved by history.
+    if all(r["tableId"] == table_id for r in matches):
+        result["seatRegionCandidates"] = [r["id"] for r in matches]
     if len(matches) != 1:
         return {**result, "reason": "AMBIGUOUS_SEAT" if matches else "NO_SEAT_MATCH"}
     result["seatRegionId"] = matches[0]["id"]
     if matches[0]["tableId"] != table_id:
         return {**result, "reason": "TABLE_MISMATCH"}
-    return {**result, "state": "CANDIDATE", "reason": "DWELLING"}
+    return {
+        **result,
+        "state": "CANDIDATE",
+        "reason": "DWELLING",
+        "seatResolution": "DIRECT",
+    }
+
+
+def stationary(previous, person):
+    cue, box = person["wristEvidence"], person["box"]
+    ref, anchor = previous["box"], cue["motionAnchor"]
+    if cue["motionSource"] != previous["motionSource"]:
+        return False
+    dx = WRIST_POLICY["maxDriftBoxWidths"] * (ref[2] - ref[0])
+    dy = WRIST_POLICY["maxDriftBoxHeights"] * (ref[3] - ref[1])
+    if dx <= 0 or dy <= 0 or any(not math.isfinite(v) for v in [*box, *anchor]):
+        return False
+    # Always compare with the first position, never accumulate small steps.
+    if (
+        abs(anchor[0] - previous["anchor"][0]) > dx
+        or abs(anchor[1] - previous["anchor"][1]) > dy
+    ):
+        return False
+    if (
+        abs((box[0] + box[2] - ref[0] - ref[2]) / 2) > dx
+        or not 0.75 <= (box[2] - box[0]) / (ref[2] - ref[0]) <= 1.33
+    ):
+        return False
+    if cue["motionSource"] == "BOX_CENTER":
+        # Without two reliable shoulders retain the conservative height guard.
+        return 0.75 <= (box[3] - box[1]) / (ref[3] - ref[1]) <= 1.33
+    # Shoulder motion, horizontal position/width and the top edge must stay
+    # stable. Only the bottom edge may change as body/torso crops alternate.
+    return abs(box[1] - ref[1]) <= dy
 
 
 class WristTrial:
@@ -97,6 +151,27 @@ class WristTrial:
         if self.last_time is not None and seconds - self.last_time > 0.8:
             self.candidates.clear()
         self.last_time = seconds
+        for person in people:
+            cue = person["wristEvidence"]
+            if cue["reason"] != "AMBIGUOUS_SEAT":
+                continue
+            previous = [
+                (key, history)
+                for key, history in self.candidates.items()
+                if key[0] == person["trackId"]
+                and key[2] == cue["tableId"]
+                and key[1] in cue["seatRegionCandidates"]
+            ]
+            # No cold-start tie-breaking, cross-table carry or missing-frame
+            # bridging. Only an immediately preceding stationary track can keep
+            # its already established seat when the current regions overlap.
+            if len(previous) == 1 and stationary(previous[0][1], person):
+                cue.update(
+                    state="CANDIDATE",
+                    reason="DWELLING",
+                    seatRegionId=previous[0][0][1],
+                    seatResolution="CONTINUITY",
+                )
         valid = [p for p in people if p["wristEvidence"]["state"] == "CANDIDATE"]
         seats = Counter(p["wristEvidence"]["seatRegionId"] for p in valid)
         tracks = Counter(p["trackId"] for p in valid)
@@ -107,37 +182,19 @@ class WristTrial:
             if seats[cue["seatRegionId"]] > 1 or tracks[person["trackId"]] > 1:
                 cue.update(state="UNKNOWN", reason="SEAT_CONFLICT")
                 continue
-            key = (
-                person["trackId"],
-                cue["seatRegionId"],
-                cue["tableId"],
-                cue["anchorSource"],
-            )
+            key = (person["trackId"], cue["seatRegionId"], cue["tableId"])
             previous = self.candidates.get(key)
-            box = person["box"]  # Normalized coordinates in the source image.
-            if previous:
-                ref = previous["box"]
-                dx = WRIST_POLICY["maxDriftBoxWidths"] * (ref[2] - ref[0])
-                dy = WRIST_POLICY["maxDriftBoxHeights"] * (ref[3] - ref[1])
-                anchor = cue["bodyAnchor"]
-                # Compare with the first sample, not the previous step: slow
-                # walking must not accumulate a stationary five-second dwell.
-                moving = (
-                    abs(anchor[0] - previous["anchor"][0]) > dx
-                    or abs(anchor[1] - previous["anchor"][1]) > dy
-                    or abs((box[0] + box[2] - ref[0] - ref[2]) / 2) > dx
-                    or abs((box[1] + box[3] - ref[1] - ref[3]) / 2) > dy
-                    or not 0.75 <= (box[2] - box[0]) / (ref[2] - ref[0]) <= 1.33
-                    or not 0.75 <= (box[3] - box[1]) / (ref[3] - ref[1]) <= 1.33
-                )
-                if moving:
-                    cue.update(state="UNKNOWN", reason="MOVING")
-                    continue
-            else:
+            if previous and previous["motionSource"] != cue["motionSource"]:
+                previous = None
+            if previous and not stationary(previous, person):
+                cue.update(state="UNKNOWN", reason="MOVING")
+                continue
+            if not previous:
                 previous = {
                     "start": seconds,
-                    "box": box[:],
-                    "anchor": cue["bodyAnchor"][:],
+                    "box": person["box"][:],
+                    "anchor": cue["motionAnchor"][:],
+                    "motionSource": cue["motionSource"],
                 }
             current[key] = previous
             cue["stableSeconds"] = round(seconds - previous["start"], 3)

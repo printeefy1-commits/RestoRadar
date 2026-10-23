@@ -38,9 +38,9 @@ class WristTrialTests(unittest.TestCase):
             self.points[knee] = [550.0, 500.0]
         self.points[9] = self.points[10] = [550.0, 400.0]
 
-    def person(self, track=1, shift=0, score=0.9):
+    def person(self, track=1, shift=0, score=0.9, box=None):
         points = [[x + shift, y] for x, y in self.points]
-        box = [300 + shift, 250, 500 + shift, 700]
+        box = box if box is not None else [300 + shift, 250, 500 + shift, 700]
         cue = wrist_observation(
             points, self.scores, box, track, score, self.seats, self.tops, 1000, 1000
         )
@@ -113,10 +113,13 @@ class WristTrialTests(unittest.TestCase):
         self.seats = []
         self.assertEqual(self.person()["wristEvidence"]["reason"], "NO_SEAT_MATCH")
 
-    def test_missing_sample_gap_track_or_anchor_change_cannot_pool_dwell(self):
-        for change in ("missing", "gap", "track", "anchor"):
+    def test_missing_sample_gap_track_or_motion_reference_change_cannot_pool_dwell(
+        self,
+    ):
+        for change in ("missing", "gap", "track", "motion"):
             with self.subTest(change=change):
                 verifier = WristTrial(["table"])
+                self.scores[5] = self.scores[6] = 0.9
                 self.scores[11] = self.scores[12] = 0.9
                 for step in range(10):
                     verifier.observe(step / 2, [self.person()])
@@ -128,8 +131,8 @@ class WristTrialTests(unittest.TestCase):
                     seconds = 6.0
                 if change == "track":
                     track = 2
-                if change == "anchor":
-                    self.scores[11] = self.scores[12] = 0.1
+                if change == "motion":
+                    self.scores[5] = self.scores[6] = 0.1
                 person = self.person(track=track)
                 self.assertEqual(
                     verifier.observe(seconds, [person]), {"table": "UNKNOWN"}
@@ -161,6 +164,153 @@ class WristTrialTests(unittest.TestCase):
         self.assertEqual(returned["wristEvidence"]["stableSeconds"], 0)
         with self.assertRaises(ValueError):
             verifier.observe(5.5, [])
+
+    def test_changing_box_bottom_with_stable_shoulders_keeps_dwell(self):
+        verifier = WristTrial(["table"])
+        for step in range(15):
+            bottom = 700 if step % 2 == 0 else 500
+            person = self.person(box=[300, 250, 500, bottom])
+            verifier.observe(step / 2, [person])
+            cue = person["wristEvidence"]
+            self.assertEqual(cue["motionSource"], "SHOULDERS")
+            self.assertEqual(cue["stableSeconds"], step / 2)
+            self.assertEqual(cue["state"], "PROBABLE" if step >= 10 else "CANDIDATE")
+
+    def test_hip_and_box_mapping_can_alternate_with_stable_motion_reference(self):
+        verifier = WristTrial(["table"])
+        for step in range(12):
+            self.scores[11] = self.scores[12] = 0.9 if step % 2 else 0.1
+            person = self.person()
+            verifier.observe(step / 2, [person])
+            self.assertEqual(person["wristEvidence"]["motionSource"], "SHOULDERS")
+            self.assertEqual(person["wristEvidence"]["stableSeconds"], step / 2)
+        self.assertEqual(person["wristEvidence"]["state"], "PROBABLE")
+
+    def test_box_fallback_cannot_ignore_crop_changes_or_slow_walking(self):
+        self.scores[5] = self.scores[6] = 0.1
+        verifier = WristTrial(["table"])
+        for step in range(10):
+            verifier.observe(step / 2, [self.person()])
+        person = self.person(box=[300, 250, 500, 500])
+        verifier.observe(5, [person])
+        self.assertEqual(person["wristEvidence"]["reason"], "MOVING")
+        verifier = WristTrial(["table"])
+        for step in range(25):
+            self.assertEqual(
+                verifier.observe(step / 2, [self.person(shift=step * 6)]),
+                {"table": "UNKNOWN"},
+            )
+
+    def test_frozen_pose_cannot_hide_box_translation_or_width_change(self):
+        for box in ([360, 250, 560, 700], [300, 320, 500, 770], [250, 250, 550, 700]):
+            with self.subTest(box=box):
+                verifier = WristTrial(["table"])
+                for step in range(10):
+                    verifier.observe(step / 2, [self.person()])
+                person = self.person(box=box)
+                self.assertEqual(verifier.observe(5, [person]), {"table": "UNKNOWN"})
+                self.assertEqual(person["wristEvidence"]["reason"], "MOVING")
+
+    def overlap(self, other_table="table"):
+        self.seats.append(
+            {
+                **self.seats[0],
+                "id": "overlap",
+                "tableId": other_table,
+                "y": 0.55,
+                "height": 0.15,
+            }
+        )
+
+    def ambiguous_hips(self):
+        self.points[11] = self.points[12] = [400.0, 560.0]
+
+    def test_overlap_can_only_keep_an_established_stationary_seat(self):
+        self.overlap()
+        verifier = WristTrial(["table"])
+        for step in range(10):
+            verifier.observe(step / 2, [self.person()])
+        self.ambiguous_hips()
+        for step in range(10, 14):
+            person = self.person()
+            self.assertEqual(person["wristEvidence"]["reason"], "AMBIGUOUS_SEAT")
+            self.assertEqual(
+                verifier.observe(step / 2, [person]), {"table": "PROBABLE"}
+            )
+            self.assertEqual(person["wristEvidence"]["seatRegionId"], "seat")
+            self.assertEqual(person["wristEvidence"]["seatResolution"], "CONTINUITY")
+            self.assertEqual(person["wristEvidence"]["stableSeconds"], step / 2)
+
+    def test_mapping_source_and_overlap_can_alternate_without_pooling_new_seats(self):
+        self.overlap()
+        verifier = WristTrial(["table"])
+        verifier.observe(0, [self.person()])
+        self.ambiguous_hips()
+        for step in range(1, 13):
+            self.scores[11] = self.scores[12] = 0.9 if step % 2 else 0.1
+            person = self.person()
+            verifier.observe(step / 2, [person])
+            cue = person["wristEvidence"]
+            self.assertEqual(cue["seatRegionId"], "seat")
+            self.assertEqual(cue["stableSeconds"], step / 2)
+            self.assertEqual(cue["state"], "PROBABLE" if step >= 10 else "CANDIDATE")
+
+    def test_ambiguous_seat_cannot_start_cold_or_bridge_missing_gap_or_new_track(self):
+        self.overlap()
+        for change in ("cold", "missing", "gap", "track", "motion"):
+            with self.subTest(change=change):
+                self.points[11] = self.points[12] = [400.0, 500.0]
+                self.scores[5] = self.scores[6] = 0.9
+                verifier = WristTrial(["table"])
+                if change != "cold":
+                    for step in range(10):
+                        verifier.observe(step / 2, [self.person()])
+                seconds = 5.0
+                if change == "missing":
+                    verifier.observe(5, [])
+                    seconds = 5.5
+                if change == "gap":
+                    seconds = 6
+                if change == "motion":
+                    self.scores[5] = self.scores[6] = 0.1
+                self.ambiguous_hips()
+                person = self.person(track=2 if change == "track" else 1)
+                self.assertEqual(
+                    verifier.observe(seconds, [person]), {"table": "UNKNOWN"}
+                )
+                self.assertEqual(person["wristEvidence"]["reason"], "AMBIGUOUS_SEAT")
+                self.assertEqual(person["wristEvidence"]["stableSeconds"], 0)
+
+    def test_overlap_cannot_follow_a_moving_person_or_cross_table_boundaries(self):
+        for other_table, shift in (("table", 60), ("other", 0)):
+            with self.subTest(table=other_table, shift=shift):
+                self.seats = self.seats[:1]
+                self.points[11] = self.points[12] = [400.0, 500.0]
+                self.overlap(other_table)
+                verifier = WristTrial(["table", "other"])
+                for step in range(10):
+                    verifier.observe(step / 2, [self.person()])
+                self.ambiguous_hips()
+                person = self.person(shift=shift)
+                self.assertTrue(
+                    all(v == "UNKNOWN" for v in verifier.observe(5, [person]).values())
+                )
+                self.assertEqual(person["wristEvidence"]["reason"], "AMBIGUOUS_SEAT")
+
+    def test_resolved_overlap_still_rejects_two_people_claiming_one_seat(self):
+        self.overlap()
+        verifier = WristTrial(["table"])
+        for step in range(10):
+            verifier.observe(step / 2, [self.person()])
+        other = self.person(track=2)
+        self.ambiguous_hips()
+        person = self.person()
+        self.assertEqual(verifier.observe(5, [person, other]), {"table": "UNKNOWN"})
+        self.assertTrue(
+            all(
+                p["wristEvidence"]["reason"] == "SEAT_CONFLICT" for p in (person, other)
+            )
+        )
 
     def test_distinct_people_in_distinct_seats_can_each_be_probable(self):
         self.seats = [

@@ -586,7 +586,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(report["events"], [])
         self.assertEqual(baseline["events"], [])
         self.assertTrue(report["wristTrial"])
-        self.assertEqual(report["wristPolicy"]["version"], "WRIST_SEAT_DWELL_V1")
+        self.assertEqual(report["wristPolicy"]["version"], "WRIST_SEAT_DWELL_V2")
         probable = [
             s for s in report["samples"] if "PROBABLE" in s["wristTables"].values()
         ]
