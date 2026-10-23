@@ -833,6 +833,8 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                                     {person.wristEvidence.tableId &&
                                       ` · ${tableName(person.wristEvidence.tableId)}`}{' '}
                                     · ثبات {person.wristEvidence.stableSeconds.toFixed(1)} ثانية
+                                    {person.wristEvidence.scoreContinuation &&
+                                      ' · استمرار مؤقت عند انخفاض درجة الرصد'}
                                     {person.wristEvidence.seatResolution === 'CONTINUITY' &&
                                       ' · احتُفظ بالمقعد السابق مع ثبات الجسم'}
                                     {person.wristEvidence.anchorSource === 'BOX_CENTER' &&

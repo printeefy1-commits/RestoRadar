@@ -586,7 +586,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(report["events"], [])
         self.assertEqual(baseline["events"], [])
         self.assertTrue(report["wristTrial"])
-        self.assertEqual(report["wristPolicy"]["version"], "WRIST_SEAT_DWELL_V2")
+        self.assertEqual(report["wristPolicy"]["version"], "WRIST_SEAT_DWELL_V3")
         probable = [
             s for s in report["samples"] if "PROBABLE" in s["wristTables"].values()
         ]
@@ -604,6 +604,59 @@ class RuntimeTests(unittest.TestCase):
                 ]
             sample.pop("wristTables")
             self.assertEqual(sample, original)
+
+    def test_score_dip_preserves_only_wrist_evidence_in_actual_runtime(self):
+        real_detector = analyze.PersonDetector
+
+        class BriefScoreDip:
+            def __init__(self, path):
+                self.detector = real_detector(path)
+                self.calls = 0
+
+            def __call__(self, frame):
+                self.calls += 1
+                detected = self.detector(frame)
+                if self.calls == 13:  # 6 seconds, after the first five-second dwell.
+                    detected.confidence[:] = 0.3039
+                return detected
+
+        baseline_path, wrist_path = (
+            self.root / "baseline-dip.json",
+            self.root / "wrist-dip.json",
+        )
+        config = {
+            **self.config,
+            "wristTrial": True,
+            "tabletopRegions": [{**self.config["regions"][0], "id": str(uuid4())}],
+        }
+        with patch.object(analyze, "PersonDetector", BriefScoreDip):
+            analyze.analyze(
+                self.source, self.config, baseline_path, self.root / "progress.json"
+            )
+            analyze.analyze(
+                self.source, config, wrist_path, self.root / "progress.json"
+            )
+        baseline, report = json.loads(baseline_path.read_text()), json.loads(
+            wrist_path.read_text()
+        )
+        self.assertEqual(report["events"], baseline["events"])
+        sample = min(report["samples"], key=lambda s: abs(s["seconds"] - 6))
+        person = sample["people"][0]
+        self.assertEqual(person["evidence"], "LOW_DETECTION_SCORE")
+        self.assertEqual(person["wristEvidence"]["state"], "PROBABLE")
+        self.assertTrue(person["wristEvidence"]["scoreContinuation"])
+        self.assertEqual(person["wristEvidence"]["lowScoreSeconds"], 0.5)
+        self.assertEqual(report["wristPolicy"]["startDetectionScore"], 0.35)
+        self.assertEqual(report["wristPolicy"]["continueDetectionScore"], 0.30)
+        for current, original in zip(report["samples"], baseline["samples"]):
+            self.assertEqual(current["tables"], original["tables"])
+            for p in current["people"]:
+                p.pop("wristEvidence")
+                p["posePoints"] = [
+                    point for point in p["posePoints"] if "WRIST" not in point["part"]
+                ]
+            current.pop("wristTables")
+            self.assertEqual(current, original)
 
     def test_black_frames_stay_unknown_even_with_constant_detection_graph(self):
         source = self.root / "black.avi"

@@ -6,7 +6,10 @@ from collections import Counter
 from decisions import MIN_DETECTION_SCORE, MIN_KEYPOINT_SCORE, matching_tables
 
 WRIST_POLICY = {
-    "version": "WRIST_SEAT_DWELL_V2",
+    "version": "WRIST_SEAT_DWELL_V3",
+    "startDetectionScore": MIN_DETECTION_SCORE,
+    "continueDetectionScore": 0.30,
+    "maxLowScoreSeconds": 1.0,
     "motionReference": "SHOULDERS_THEN_BOX_CENTER",
     "overlapResolution": "PREVIOUS_SEAT_WHILE_STATIONARY",
     "seconds": 5,
@@ -52,10 +55,13 @@ def wrist_observation(points, scores, box, track_id, score, seats, tops, width, 
         "seatRegionCandidates": [],
         "seatResolution": None,
         "stableSeconds": 0,
+        "detectionScore": float(score) if math.isfinite(score) else None,
+        "scoreContinuation": False,
+        "lowScoreSeconds": 0,
     }
     if track_id is None:
         return {**result, "reason": "NO_TRACK"}
-    if not math.isfinite(score) or score < MIN_DETECTION_SCORE:
+    if not math.isfinite(score) or score < WRIST_POLICY["continueDetectionScore"]:
         return {**result, "reason": "LOW_DETECTION_SCORE"}
     if visibly_standing(points, scores):
         return {**result, "reason": "STANDING"}
@@ -103,8 +109,8 @@ def wrist_observation(points, scores, box, track_id, score, seats, tops, width, 
         return {**result, "reason": "TABLE_MISMATCH"}
     return {
         **result,
-        "state": "CANDIDATE",
-        "reason": "DWELLING",
+        "state": "CANDIDATE" if score >= MIN_DETECTION_SCORE else "UNKNOWN",
+        "reason": "DWELLING" if score >= MIN_DETECTION_SCORE else "LOW_DETECTION_SCORE",
         "seatResolution": "DIRECT",
     }
 
@@ -137,6 +143,23 @@ def stationary(previous, person):
     return abs(box[1] - ref[1]) <= dy
 
 
+def can_continue_score(previous, person, seconds):
+    cue = person["wristEvidence"]
+    score = cue["detectionScore"]
+    return (
+        previous is not None
+        and previous["qualified"]
+        and score is not None
+        and math.isfinite(score)
+        and WRIST_POLICY["continueDetectionScore"] <= score < MIN_DETECTION_SCORE
+        and 0
+        < seconds - previous["lastStrongSeconds"]
+        <= WRIST_POLICY["maxLowScoreSeconds"]
+        and cue["motionSource"] == "SHOULDERS"
+        and stationary(previous, person)
+    )
+
+
 class WristTrial:
     def __init__(self, table_ids):
         self.table_ids = set(table_ids)
@@ -153,6 +176,21 @@ class WristTrial:
         self.last_time = seconds
         for person in people:
             cue = person["wristEvidence"]
+            if (
+                cue["reason"] == "LOW_DETECTION_SCORE"
+                and cue["seatRegionId"] is not None
+            ):
+                key = (person["trackId"], cue["seatRegionId"], cue["tableId"])
+                history = self.candidates.get(key)
+                if can_continue_score(history, person, seconds):
+                    cue.update(
+                        state="CANDIDATE",
+                        reason="DWELLING",
+                        scoreContinuation=True,
+                        lowScoreSeconds=round(
+                            seconds - history["lastStrongSeconds"], 3
+                        ),
+                    )
             if cue["reason"] != "AMBIGUOUS_SEAT":
                 continue
             previous = [
@@ -165,12 +203,23 @@ class WristTrial:
             # No cold-start tie-breaking, cross-table carry or missing-frame
             # bridging. Only an immediately preceding stationary track can keep
             # its already established seat when the current regions overlap.
-            if len(previous) == 1 and stationary(previous[0][1], person):
+            if len(previous) != 1 or not stationary(previous[0][1], person):
+                continue
+            history = previous[0][1]
+            strong = cue["detectionScore"] >= MIN_DETECTION_SCORE
+            continued = can_continue_score(history, person, seconds)
+            if strong or continued:
                 cue.update(
                     state="CANDIDATE",
                     reason="DWELLING",
                     seatRegionId=previous[0][0][1],
                     seatResolution="CONTINUITY",
+                    scoreContinuation=continued,
+                    lowScoreSeconds=(
+                        round(seconds - history["lastStrongSeconds"], 3)
+                        if continued
+                        else 0
+                    ),
                 )
         valid = [p for p in people if p["wristEvidence"]["state"] == "CANDIDATE"]
         seats = Counter(p["wristEvidence"]["seatRegionId"] for p in valid)
@@ -180,7 +229,12 @@ class WristTrial:
         for person in valid:
             cue = person["wristEvidence"]
             if seats[cue["seatRegionId"]] > 1 or tracks[person["trackId"]] > 1:
-                cue.update(state="UNKNOWN", reason="SEAT_CONFLICT")
+                cue.update(
+                    state="UNKNOWN",
+                    reason="SEAT_CONFLICT",
+                    scoreContinuation=False,
+                    lowScoreSeconds=0,
+                )
                 continue
             key = (person["trackId"], cue["seatRegionId"], cue["tableId"])
             previous = self.candidates.get(key)
@@ -195,7 +249,21 @@ class WristTrial:
                     "box": person["box"][:],
                     "anchor": cue["motionAnchor"][:],
                     "motionSource": cue["motionSource"],
+                    "lastStrongSeconds": seconds,
+                    "qualified": False,
                 }
+            # Never refresh the strong-score clock from a low-score sample.
+            # This bounds a dip even when a detector keeps emitting weak boxes.
+            previous = {
+                **previous,
+                "lastStrongSeconds": (
+                    seconds
+                    if cue["detectionScore"] >= MIN_DETECTION_SCORE
+                    else previous["lastStrongSeconds"]
+                ),
+                "qualified": previous["qualified"]
+                or seconds - previous["start"] >= WRIST_POLICY["seconds"],
+            }
             current[key] = previous
             cue["stableSeconds"] = round(seconds - previous["start"], 3)
             if seconds - previous["start"] >= WRIST_POLICY["seconds"]:

@@ -76,6 +76,9 @@ export interface WristEvidence {
   seatRegionCandidates?: string[];
   seatResolution?: 'DIRECT' | 'CONTINUITY' | null;
   stableSeconds: number;
+  detectionScore?: number | null;
+  scoreContinuation?: boolean;
+  lowScoreSeconds?: number;
 }
 export interface TrialPerson {
   box: [number, number, number, number];
@@ -120,7 +123,10 @@ export interface TrialReport {
   wristTrial?: boolean;
   tabletopRegions?: SeatRegion[];
   wristPolicy?: {
-    version: 'WRIST_SEAT_DWELL_V1' | 'WRIST_SEAT_DWELL_V2';
+    version: 'WRIST_SEAT_DWELL_V1' | 'WRIST_SEAT_DWELL_V2' | 'WRIST_SEAT_DWELL_V3';
+    startDetectionScore?: number;
+    continueDetectionScore?: number;
+    maxLowScoreSeconds?: number;
     motionReference?: 'SHOULDERS_THEN_BOX_CENTER';
     overlapResolution?: 'PREVIOUS_SEAT_WHILE_STATIONARY';
     seconds: number;

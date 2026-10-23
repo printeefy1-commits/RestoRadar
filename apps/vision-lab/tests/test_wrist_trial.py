@@ -44,7 +44,12 @@ class WristTrialTests(unittest.TestCase):
         cue = wrist_observation(
             points, self.scores, box, track, score, self.seats, self.tops, 1000, 1000
         )
-        return {"trackId": track, "box": [v / 1000 for v in box], "wristEvidence": cue}
+        return {
+            "trackId": track,
+            "score": score,
+            "box": [v / 1000 for v in box],
+            "wristEvidence": cue,
+        }
 
     def test_stationary_wrists_require_five_source_seconds_and_never_confirm_seating(
         self,
@@ -311,6 +316,167 @@ class WristTrialTests(unittest.TestCase):
                 p["wristEvidence"]["reason"] == "SEAT_CONFLICT" for p in (person, other)
             )
         )
+
+    def verified(self):
+        verifier = WristTrial(["table", "other"])
+        for step in range(11):
+            verifier.observe(step / 2, [self.person()])
+        return verifier
+
+    def test_qualified_track_can_continue_a_short_score_dip_and_recover(self):
+        verifier = self.verified()
+        person = self.person(score=0.3039)
+        self.assertEqual(verifier.observe(5.5, [person])["table"], "PROBABLE")
+        cue = person["wristEvidence"]
+        self.assertTrue(cue["scoreContinuation"])
+        self.assertEqual(cue["lowScoreSeconds"], 0.5)
+        self.assertEqual(cue["stableSeconds"], 5.5)
+        person = self.person(score=0.35)
+        verifier.observe(6, [person])
+        self.assertEqual(person["wristEvidence"]["stableSeconds"], 6)
+        self.assertFalse(person["wristEvidence"]["scoreContinuation"])
+        self.assertEqual(person["wristEvidence"]["lowScoreSeconds"], 0)
+        person = self.person(score=0.30)
+        self.assertEqual(verifier.observe(6.5, [person])["table"], "PROBABLE")
+        self.assertTrue(person["wristEvidence"]["scoreContinuation"])
+
+    def test_weak_score_cannot_start_or_complete_the_first_five_seconds(self):
+        verifier = WristTrial(["table"])
+        for step in range(25):
+            self.assertEqual(
+                verifier.observe(step / 2, [self.person(score=0.3039)]),
+                {"table": "UNKNOWN"},
+            )
+        verifier = WristTrial(["table"])
+        for step in range(10):
+            verifier.observe(step / 2, [self.person()])
+        self.assertEqual(
+            verifier.observe(5, [self.person(score=0.3039)]), {"table": "UNKNOWN"}
+        )
+        person = self.person()
+        verifier.observe(5.5, [person])
+        self.assertEqual(person["wristEvidence"]["stableSeconds"], 0)
+
+    def test_continuation_expires_from_last_strong_score_not_each_weak_sample(self):
+        verifier = self.verified()
+        for seconds in (5.5, 6):
+            person = self.person(score=0.31)
+            self.assertEqual(verifier.observe(seconds, [person])["table"], "PROBABLE")
+            self.assertEqual(person["wristEvidence"]["lowScoreSeconds"], seconds - 5)
+        for seconds in (6.5, 7, 7.5):
+            person = self.person(score=0.31)
+            self.assertEqual(verifier.observe(seconds, [person])["table"], "UNKNOWN")
+            self.assertFalse(person["wristEvidence"]["scoreContinuation"])
+        person = self.person()
+        verifier.observe(8, [person])
+        self.assertEqual(person["wristEvidence"]["stableSeconds"], 0)
+
+    def test_continuation_rejects_scores_below_floor_or_non_finite(self):
+        for score in (0.2999, 0.16, float("nan"), float("inf")):
+            with self.subTest(score=score):
+                verifier = self.verified()
+                person = self.person(score=score)
+                self.assertEqual(verifier.observe(5.5, [person])["table"], "UNKNOWN")
+                self.assertFalse(person["wristEvidence"]["scoreContinuation"])
+                returned = self.person()
+                verifier.observe(6, [returned])
+                self.assertEqual(returned["wristEvidence"]["stableSeconds"], 0)
+
+    def test_raw_score_controls_continuation_even_when_display_rounds_up(self):
+        verifier = self.verified()
+        for seconds in (5.5, 6, 6.5):
+            person = self.person(score=0.34998)
+            person["score"] = 0.35  # Public person score is rounded for display.
+            state = verifier.observe(seconds, [person])["table"]
+            self.assertEqual(state, "PROBABLE" if seconds <= 6 else "UNKNOWN")
+            self.assertEqual(person["wristEvidence"]["scoreContinuation"], seconds <= 6)
+        self.overlap()
+        verifier = WristTrial(["table"])
+        for step in range(10):
+            verifier.observe(step / 2, [self.person()])
+        self.ambiguous_hips()
+        person = self.person(score=0.34998)
+        person["score"] = 0.35
+        self.assertEqual(verifier.observe(5, [person])["table"], "UNKNOWN")
+        self.assertEqual(person["wristEvidence"]["stableSeconds"], 0)
+
+    def test_continuation_requires_same_track_seat_table_and_motion_reference(self):
+        for change in ("track", "seat", "table", "shoulders", "missing", "gap"):
+            with self.subTest(change=change):
+                self.setUp()
+                verifier = self.verified()
+                seconds = 5.5
+                if change == "seat":
+                    self.seats[0]["id"] = "new-seat"
+                if change == "table":
+                    self.seats[0]["tableId"] = self.tops[0]["tableId"] = "other"
+                if change == "shoulders":
+                    self.scores[5] = 0.2
+                if change == "missing":
+                    verifier.observe(5.5, [])
+                    seconds = 6
+                if change == "gap":
+                    seconds = 6.5
+                person = self.person(track=2 if change == "track" else 1, score=0.3039)
+                self.assertTrue(
+                    all(
+                        v == "UNKNOWN"
+                        for v in verifier.observe(seconds, [person]).values()
+                    )
+                )
+                self.assertFalse(person["wristEvidence"]["scoreContinuation"])
+
+    def test_low_score_never_bypasses_wrist_visibility_standing_or_movement(self):
+        for change in ("wrist", "outside", "standing", "moving"):
+            with self.subTest(change=change):
+                self.setUp()
+                verifier = self.verified()
+                if change == "wrist":
+                    self.scores[9] = self.scores[10] = 0.2
+                if change == "outside":
+                    self.points[9] = self.points[10] = [100.0, 100.0]
+                if change == "standing":
+                    self.points[13] = self.points[14] = [400.0, 700.0]
+                person = self.person(
+                    score=0.3039, shift=60 if change == "moving" else 0
+                )
+                self.assertEqual(verifier.observe(5.5, [person])["table"], "UNKNOWN")
+                self.assertFalse(person["wristEvidence"]["scoreContinuation"])
+
+    def test_score_continuation_still_rejects_same_seat_conflicts(self):
+        verifier = self.verified()
+        people = [self.person(score=0.3039), self.person(track=2)]
+        self.assertEqual(verifier.observe(5.5, people)["table"], "UNKNOWN")
+        self.assertTrue(
+            all(p["wristEvidence"]["reason"] == "SEAT_CONFLICT" for p in people)
+        )
+        self.assertTrue(
+            all(not p["wristEvidence"]["scoreContinuation"] for p in people)
+        )
+        person = self.person()
+        verifier.observe(6, [person])
+        self.assertEqual(person["wristEvidence"]["stableSeconds"], 0)
+
+    def test_weak_overlap_requires_both_qualified_history_and_stationarity(self):
+        for qualified in (False, True):
+            with self.subTest(qualified=qualified):
+                self.setUp()
+                self.overlap()
+                verifier = WristTrial(["table"])
+                for step in range(11 if qualified else 10):
+                    verifier.observe(step / 2, [self.person()])
+                self.ambiguous_hips()
+                person = self.person(score=0.3039)
+                seconds = 5.5 if qualified else 5
+                state = verifier.observe(seconds, [person])["table"]
+                self.assertEqual(state, "PROBABLE" if qualified else "UNKNOWN")
+                self.assertEqual(
+                    person["wristEvidence"]["scoreContinuation"], qualified
+                )
+                if qualified:
+                    self.assertEqual(
+                        person["wristEvidence"]["seatResolution"], "CONTINUITY"
+                    )
 
     def test_distinct_people_in_distinct_seats_can_each_be_probable(self):
         self.seats = [
