@@ -18,6 +18,7 @@ export const videoTrialSchema = z
     startSeconds: z.number().min(0).max(86400),
     durationSeconds: z.number().int().min(6).max(120),
     detectionMode: z.enum(['FULL_FRAME', 'SEAT_FOCUS']).optional(),
+    poseModel: z.enum(['RTMPOSE_TINY', 'RTMPOSE_MEDIUM']).optional(),
     regions: z.array(seatRegionSchema).min(1).max(40),
   })
   .strict()
@@ -58,6 +59,7 @@ export interface TrialPerson {
 export interface TrialReport {
   mode: 'RECORDED_VIDEO_DRY_RUN';
   detectionMode?: 'FULL_FRAME' | 'SEAT_FOCUS';
+  poseModel?: 'RTMPOSE_TINY' | 'RTMPOSE_MEDIUM';
   focusMergePolicy?: 'ALIGNED_CONTAINMENT_V1';
   sourceId: string;
   models: { detector: string; pose: string; tracker: string; artifacts: Record<string, string> };

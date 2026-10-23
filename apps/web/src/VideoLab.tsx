@@ -43,6 +43,7 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
   const [startSeconds, setStartSeconds] = useState(0);
   const [durationSeconds, setDurationSeconds] = useState(60);
   const [detectionMode, setDetectionMode] = useState<'FULL_FRAME' | 'SEAT_FOCUS'>('FULL_FRAME');
+  const [poseModel, setPoseModel] = useState<'RTMPOSE_TINY' | 'RTMPOSE_MEDIUM'>('RTMPOSE_TINY');
   const video = useRef<HTMLVideoElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const sourceId = useRef<string | null>(null);
@@ -179,6 +180,7 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
           startSeconds,
           durationSeconds,
           detectionMode,
+          poseModel,
           regions,
         }),
       );
@@ -508,6 +510,23 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                   </p>
                 )}
                 <label>
+                  نموذج تقدير الجلوس
+                  <select
+                    disabled={running}
+                    value={poseModel}
+                    onChange={(event) => setPoseModel(event.target.value as typeof poseModel)}
+                  >
+                    <option value="RTMPOSE_TINY">النموذج الخفيف الحالي</option>
+                    <option value="RTMPOSE_MEDIUM">نموذج أكبر · تجربة أبطأ</option>
+                  </select>
+                </label>
+                {poseModel === 'RTMPOSE_MEDIUM' && (
+                  <p className="muted">
+                    يُنزّل النموذج الأكبر عند أول تشغيل له، وقد يستغرق التنزيل والتحليل وقتًا
+                    إضافيًا. نستخدمه للمقارنة؛ لا يضمن تأكيد الجلوس عند حجب الجسم.
+                  </p>
+                )}
+                <label>
                   بداية المقطع بالثواني
                   <input
                     type="number"
@@ -549,10 +568,13 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                   {running ? 'جارٍ التحليل…' : 'تحليل الفيديو على CPU'}
                 </button>
                 {job?.status === 'RUNNING' && (
-                  <label>
-                    تقدم التحليل
-                    <progress max={1} value={job.progress} />
-                  </label>
+                  <>
+                    <label>
+                      تقدم التحليل
+                      <progress max={1} value={job.progress} />
+                    </label>
+                    {job.message && <p className="muted">{job.message}</p>}
+                  </>
                 )}
                 {job?.status === 'FAILED' && (
                   <p className="message error" role="alert">
@@ -567,6 +589,10 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                       {report.detectionMode === 'SEAT_FOCUS'
                         ? 'الصورة ومناطق المقاعد'
                         : 'الصورة كاملة'}
+                    </p>
+                    <p>
+                      نموذج تقدير الجلوس في التقرير:{' '}
+                      {report.poseModel === 'RTMPOSE_MEDIUM' ? 'النموذج الأكبر' : 'النموذج الخفيف'}
                     </p>
                     <p>
                       عولجت {report.analyzedSamples} عينة خلال {report.processingSeconds.toFixed(1)}{' '}

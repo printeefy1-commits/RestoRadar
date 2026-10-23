@@ -52,6 +52,7 @@ class Trial(BaseModel):
     durationSeconds: int = Field(ge=6, le=120)
     regions: list[Region] = Field(min_length=1, max_length=40)
     detectionMode: Literal["FULL_FRAME", "SEAT_FOCUS"] = "FULL_FRAME"
+    poseModel: Literal["RTMPOSE_TINY", "RTMPOSE_MEDIUM"] = "RTMPOSE_TINY"
 
     @model_validator(mode="after")
     def unique_regions(self):
@@ -149,10 +150,13 @@ def public_job(job):
         result["message"] = job["message"]
     if job["status"] == "RUNNING":
         try:
-            result["progress"] = json.loads(
-                (job["path"] / "progress.json").read_text()
-            )["progress"]
-        except (OSError, ValueError, KeyError):
+            progress = json.loads((job["path"] / "progress.json").read_text())
+            result["progress"] = progress["progress"]
+            if progress.get("phase") == "PREPARING_POSE":
+                result["message"] = (
+                    "جارٍ تجهيز نموذج تقدير الجلوس؛ قد يتضمن تنزيله لأول مرة."
+                )
+        except (OSError, ValueError, KeyError, TypeError):
             pass
     if job["status"] == "COMPLETED":
         result["report"] = json.loads((job["path"] / "result.json").read_text())
@@ -178,10 +182,20 @@ def monitor(job, source_id):
             f"Video trial {job['id']} failed ({type(error).__name__}): {detail}",
             flush=True,
         )
+        message = "لم يكتمل التحليل. تحقق من صلاحية الفيديو والنماذج أو جرّب مدة أقصر."
+        try:
+            progress = json.loads((job["path"] / "progress.json").read_text())
+            if progress.get("phase") == "PREPARING_POSE":
+                message = (
+                    "تعذر تجهيز نموذج تقدير الجلوس المختار. "
+                    "يمكنك اختيار النموذج الخفيف الحالي، أو إعادة محاولة النموذج الأكبر."
+                )
+        except (OSError, ValueError, TypeError):
+            pass
         with lock:
             job.update(
                 status="FAILED",
-                message="لم يكتمل التحليل. تحقق من صلاحية الفيديو والنماذج أو جرّب مدة أقصر.",
+                message=message,
             )
     finally:
         with lock:

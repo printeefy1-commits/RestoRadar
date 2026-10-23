@@ -8,7 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from uuid import uuid4
 import zipfile
 
@@ -188,6 +188,16 @@ class FocusedDetectionTests(unittest.TestCase):
             "regions": [region],
         }
         self.assertEqual(service.Trial(**trial).detectionMode, "FULL_FRAME")
+        self.assertEqual(service.Trial(**trial).poseModel, "RTMPOSE_TINY")
+        self.assertEqual(
+            service.Trial(**{**trial, "poseModel": "RTMPOSE_MEDIUM"}).poseModel,
+            "RTMPOSE_MEDIUM",
+        )
+        for invalid in ("unknown", "https://example.invalid/model.onnx"):
+            with self.assertRaises(ValueError):
+                service.Trial(**{**trial, "poseModel": invalid})
+        with self.assertRaises(ValueError):
+            service.Trial(**{**trial, "poseUrl": "https://example.invalid/model.onnx"})
         self.assertEqual(
             service.Trial(**{**trial, "detectionMode": "SEAT_FOCUS"}).detectionMode,
             "SEAT_FOCUS",
@@ -291,11 +301,29 @@ class RuntimeTests(unittest.TestCase):
             service.active = None
         self.temp.cleanup()
 
+    def medium_model(self, score=1):
+        model = onnx.load(str(self.model_dir / "pose.onnx"))
+        model.graph.name = "synthetic-medium-test-only"
+        for node in model.graph.node:
+            for attribute in node.attribute:
+                if attribute.name == "value":
+                    value = numpy_helper.to_array(attribute.t).copy() * score
+                    attribute.t.CopyFrom(numpy_helper.from_array(value))
+        target = self.model_dir / "pose-medium.onnx"
+        onnx.save(model, str(target))
+        record = {
+            "url": models.POSE_MODELS["RTMPOSE_MEDIUM"]["url"],
+            "sha256": models.digest(target),
+        }
+        (self.model_dir / "pose-medium.json").write_text(json.dumps(record))
+        return record
+
     def test_actual_onnx_and_bytetrack_pipeline_preserves_video_time(self):
         output = self.root / "result.json"
         analyze.analyze(self.source, self.config, output, self.root / "progress.json")
         report = json.loads(output.read_text())
         self.assertEqual(report["mode"], "RECORDED_VIDEO_DRY_RUN")
+        self.assertEqual(report["poseModel"], "RTMPOSE_TINY")
         self.assertNotIn("focusMergePolicy", report)
         self.assertFalse(report["departureEvaluated"])
         self.assertEqual(len(report["events"]), 1)
@@ -322,6 +350,127 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(
             len({p["trackId"] for s in report["samples"] for p in s["people"]}), 1
         )
+
+    def test_selected_medium_uses_one_cpu_pose_session_and_preserves_evidence_rules(
+        self,
+    ):
+        baseline = (self.model_dir / "manifest.json").read_bytes()
+        for mode in ("FULL_FRAME", "SEAT_FOCUS"):
+            for score in (1, 0.1):
+                with self.subTest(mode=mode, score=score):
+                    record = self.medium_model(score)
+                    config = {
+                        **self.config,
+                        "poseModel": "RTMPOSE_MEDIUM",
+                        "detectionMode": mode,
+                    }
+                    output = self.root / "medium.json"
+                    with (
+                        patch.object(
+                            analyze, "CpuPose", wraps=analyze.CpuPose
+                        ) as loader,
+                        patch("urllib.request.urlopen") as fetch,
+                    ):
+                        analyze.analyze(
+                            self.source, config, output, self.root / "progress.json"
+                        )
+                    loader.assert_called_once_with(self.model_dir / "pose-medium.onnx")
+                    fetch.assert_not_called()
+                    report = json.loads(output.read_text())
+                    self.assertEqual(report["poseModel"], "RTMPOSE_MEDIUM")
+                    self.assertEqual(report["models"]["pose"], "RTMPose-m (body7 ONNX)")
+                    self.assertEqual(
+                        report["models"]["artifacts"]["pose"], record["sha256"]
+                    )
+                    self.assertNotEqual(
+                        record["sha256"], models.manifest()["pose"]["sha256"]
+                    )
+                    self.assertEqual(
+                        report["evidencePolicy"],
+                        {
+                            "minDetectionScore": 0.35,
+                            "minKeypointScore": 0.4,
+                            "seatingSeconds": 5,
+                        },
+                    )
+                    self.assertFalse(report["departureEvaluated"])
+                    people = [p for s in report["samples"] for p in s["people"]]
+                    self.assertTrue(people)
+                    if score == 1:
+                        self.assertEqual(len(report["events"]), 1)
+                        self.assertEqual(report["events"][0]["confirmedSeconds"], 5)
+                    else:
+                        self.assertEqual(report["events"], [])
+                        self.assertTrue(
+                            all(p["evidence"] == "POSE_UNCERTAIN" for p in people)
+                        )
+                        self.assertTrue(
+                            all(
+                                set(s["tables"].values()) == {"UNKNOWN"}
+                                for s in report["samples"]
+                            )
+                        )
+        self.assertEqual((self.model_dir / "manifest.json").read_bytes(), baseline)
+
+    def test_pose_interface_and_non_finite_outputs_are_rejected(self):
+        path = self.root / "invalid-pose.onnx"
+        for shape, points in (([1, 3, 384, 288], 17), ([1, 3, 256, 192], 18)):
+            constant_graph(
+                path,
+                shape,
+                {
+                    "simcc_x": np.zeros((1, points, 384), np.float32),
+                    "simcc_y": np.zeros((1, points, 512), np.float32),
+                },
+            )
+            with self.assertRaisesRegex(ValueError, "pose model interface"):
+                analyze.CpuPose(path)
+        constant_graph(
+            path,
+            [1, 3, 256, 192],
+            {
+                "simcc_x": np.full((1, 17, 384), np.nan, np.float32),
+                "simcc_y": np.zeros((1, 17, 512), np.float32),
+            },
+        )
+        pose = analyze.CpuPose(path)
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            pose(np.zeros((240, 320, 3), np.uint8), bboxes=[[0, 0, 320, 240]])
+
+    def test_optional_preparation_failure_leaves_baseline_ready_and_runnable(self):
+        service.model_state["models"] = "READY"
+        progress = self.root / "progress.json"
+        with patch.object(analyze, "prepare_pose", side_effect=OSError("offline")):
+            with self.assertRaises(OSError):
+                analyze.analyze(
+                    self.source,
+                    {**self.config, "poseModel": "RTMPOSE_MEDIUM"},
+                    self.root / "result.json",
+                    progress,
+                )
+        process = Mock()
+        process.wait.return_value = 1
+        job = {
+            "id": str(uuid4()),
+            "status": "RUNNING",
+            "progress": 0,
+            "path": self.root,
+            "process": process,
+        }
+        service.active = job
+        self.assertIn("جارٍ تجهيز", service.public_job(job)["message"])
+        with patch("builtins.print"):
+            service.monitor(job, self.config["sourceId"])
+        self.assertEqual(job["status"], "FAILED")
+        self.assertIn("النموذج الخفيف الحالي", job["message"])
+        self.assertNotIn("offline", job["message"])
+        self.assertIsNone(service.active)
+        self.assertEqual(service.model_state["models"], "READY")
+        output = self.root / "baseline.json"
+        analyze.analyze(self.source, self.config, output, progress)
+        report = json.loads(output.read_text())
+        self.assertEqual(report["poseModel"], "RTMPOSE_TINY")
+        self.assertEqual(len(report["events"]), 1)
 
     def test_black_frames_stay_unknown_even_with_constant_detection_graph(self):
         source = self.root / "black.avi"
@@ -441,6 +590,31 @@ class RuntimeTests(unittest.TestCase):
                 time.sleep(0.1)
             self.assertEqual(job["status"], "COMPLETED", job)
             self.assertEqual(len(job["report"]["events"]), 1)
+
+    def test_worker_runs_selected_medium_in_child_process(self):
+        record = self.medium_model()
+        service.model_state["models"] = "READY"
+        tenant = str(uuid4())
+        with patch.object(service, "prepare_models"), TestClient(service.app) as client:
+            response = client.post(
+                f"/restaurants/{tenant}/jobs",
+                json={**self.config, "poseModel": "RTMPOSE_MEDIUM"},
+            )
+            self.assertEqual(response.status_code, 202, response.text)
+            job_id = response.json()["id"]
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                job = client.get(f"/restaurants/{tenant}/jobs/{job_id}").json()
+                if job["status"] != "RUNNING":
+                    break
+                time.sleep(0.1)
+            self.assertEqual(job["status"], "COMPLETED", job)
+            self.assertEqual(job["report"]["poseModel"], "RTMPOSE_MEDIUM")
+            self.assertEqual(
+                job["report"]["models"]["artifacts"]["pose"], record["sha256"]
+            )
+            self.assertEqual(job["report"]["events"][0]["confirmedSeconds"], 5)
+            self.assertEqual(client.get("/status").json()["models"], "READY")
 
     def test_downloader_does_not_extract_archive_paths(self):
         archive = io.BytesIO()

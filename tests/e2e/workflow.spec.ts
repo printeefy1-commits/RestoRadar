@@ -329,7 +329,15 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
     if (path.endsWith('/jobs/latest')) return route.fulfill({ json: null });
     if (path.endsWith('/jobs') && route.request().method() === 'POST') {
       submitted = route.request().postDataJSON() as VideoTrial;
-      return route.fulfill({ status: 202, json: { id: jobId, status: 'RUNNING', progress: 0.5 } });
+      return route.fulfill({
+        status: 202,
+        json: {
+          id: jobId,
+          status: 'RUNNING',
+          progress: 0,
+          message: 'جارٍ تجهيز نموذج تقدير الجلوس؛ قد يتضمن تنزيله لأول مرة.',
+        },
+      });
     }
     if (path.endsWith(`/jobs/${jobId}`)) {
       const report: TrialReport = {
@@ -348,6 +356,7 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
         samplesPerProcessingSecond: 6.5,
         departureEvaluated: false,
         detectionMode: submitted!.detectionMode,
+        poseModel: submitted!.poseModel,
         regions: submitted!.regions,
         events: [
           {
@@ -426,13 +435,32 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
   await page.getByLabel('الارتفاع %').fill('20');
   await page.getByRole('button', { name: 'إضافة المنطقة', exact: true }).click();
   await expect(page.getByLabel('طريقة رصد الأشخاص')).toHaveValue('FULL_FRAME');
+  await expect(page.getByRole('combobox', { name: 'نموذج تقدير الجلوس', exact: true })).toHaveValue(
+    'RTMPOSE_TINY',
+  );
   await page.getByLabel('طريقة رصد الأشخاص').selectOption('SEAT_FOCUS');
+  await page
+    .getByRole('combobox', { name: 'نموذج تقدير الجلوس', exact: true })
+    .selectOption('RTMPOSE_MEDIUM');
   await page.getByLabel('مدة الاختبار بالثواني').fill('6');
   await page.getByRole('button', { name: 'تحليل الفيديو على CPU', exact: true }).click();
+  await expect(
+    page.getByText('جارٍ تجهيز نموذج تقدير الجلوس؛ قد يتضمن تنزيله لأول مرة.', { exact: true }),
+  ).toBeVisible();
   await expect(page.getByRole('heading', { name: 'نتيجة التجربة', exact: true })).toBeVisible();
   expect(submitted?.detectionMode).toBe('SEAT_FOCUS');
+  expect(submitted?.poseModel).toBe('RTMPOSE_MEDIUM');
   await expect(
     page.getByText('طريقة الرصد في التقرير: الصورة ومناطق المقاعد', { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText('نموذج تقدير الجلوس في التقرير: النموذج الأكبر', { exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole('combobox', { name: 'نموذج تقدير الجلوس', exact: true })
+    .selectOption('RTMPOSE_TINY');
+  await expect(
+    page.getByText('نموذج تقدير الجلوس في التقرير: النموذج الأكبر', { exact: true }),
   ).toBeVisible();
   expect(submitted?.regions[0]).toMatchObject({ x: 0.1, y: 0.2, width: 0.2, height: 0.2 });
   await page.getByRole('button', { name: 'عرض اللحظة', exact: true }).click();

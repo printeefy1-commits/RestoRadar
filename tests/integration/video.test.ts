@@ -49,9 +49,17 @@ beforeAll(async () => {
   });
   backend.post('/restaurants/:restaurantId/jobs', (request, reply) => {
     expect(request.params).toEqual({ restaurantId: tenant });
-    const mode = (request.body as { detectionMode?: string }).detectionMode;
-    expect(['FULL_FRAME', 'SEAT_FOCUS', undefined]).toContain(mode);
-    expect(request.body).toEqual(mode ? { ...trial, detectionMode: mode } : trial);
+    const { detectionMode, poseModel } = request.body as {
+      detectionMode?: string;
+      poseModel?: string;
+    };
+    expect(['FULL_FRAME', 'SEAT_FOCUS', undefined]).toContain(detectionMode);
+    expect(['RTMPOSE_TINY', 'RTMPOSE_MEDIUM', undefined]).toContain(poseModel);
+    expect(request.body).toEqual({
+      ...trial,
+      ...(detectionMode === undefined ? {} : { detectionMode }),
+      ...(poseModel === undefined ? {} : { poseModel }),
+    });
     return reply.code(202).send({ id: randomUUID(), status: 'RUNNING', progress: 0 });
   });
   backend.get('/restaurants/:restaurantId/jobs/latest', () => storedJob);
@@ -170,18 +178,31 @@ describe('owner-only recorded-video gateway', () => {
       ).statusCode,
     ).toBe(416);
   });
-  it('forwards an owner’s explicit focused mode and rejects unsupported modes', async () => {
-    const send = (detectionMode: string) =>
+  it('forwards explicit detector and pose choices while rejecting unsupported models and URLs', async () => {
+    const send = (options: Record<string, unknown>) =>
       app.inject({
         method: 'POST',
         url: `/api/restaurants/${tenant}/video-lab/jobs`,
         headers: { cookie: identities.OWNER.cookie },
-        payload: { ...trial, detectionMode },
+        payload: { ...trial, ...options },
       });
     const initial = calls;
-    expect((await send('unexpected')).statusCode).toBe(400);
+    for (const invalid of [
+      { detectionMode: 'unexpected' },
+      { poseModel: 'unexpected' },
+      { poseModel: 'https://example.invalid/model.onnx' },
+      { poseModel: 'RTMPOSE_MEDIUM', poseUrl: 'https://example.invalid/model.onnx' },
+    ])
+      expect((await send(invalid)).statusCode).toBe(400);
     expect(calls).toBe(initial);
-    expect((await send('SEAT_FOCUS')).statusCode).toBe(202);
+    for (const valid of [
+      {},
+      { detectionMode: 'SEAT_FOCUS' },
+      { poseModel: 'RTMPOSE_TINY' },
+      { poseModel: 'RTMPOSE_MEDIUM' },
+      { detectionMode: 'SEAT_FOCUS', poseModel: 'RTMPOSE_MEDIUM' },
+    ])
+      expect((await send(valid)).statusCode).toBe(202);
   });
   it('preserves focused merge diagnostics and historical reports through both job routes', async () => {
     const report: TrialReport = {
@@ -207,7 +228,11 @@ describe('owner-only recorded-video gateway', () => {
     try {
       for (const currentReport of [
         report,
-        { ...report, focusMergePolicy: 'ALIGNED_CONTAINMENT_V1' as const },
+        {
+          ...report,
+          poseModel: 'RTMPOSE_MEDIUM' as const,
+          focusMergePolicy: 'ALIGNED_CONTAINMENT_V1' as const,
+        },
       ]) {
         storedJob = { id: randomUUID(), status: 'COMPLETED', progress: 1, report: currentReport };
         for (const path of ['/jobs/latest', `/jobs/${storedJob.id}`]) {

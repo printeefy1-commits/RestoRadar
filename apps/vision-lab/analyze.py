@@ -19,7 +19,7 @@ from decisions import (
     seated_anchor,
     seating_evidence,
 )
-from models import MODEL_DIR, manifest
+from models import MODEL_DIR, manifest, pose_spec, prepare_pose
 from focused_detection import (
     FOCUS_MERGE_POLICY,
     MAX_FOCUS_TABLES,
@@ -42,6 +42,37 @@ class CpuPose(RTMPose):
         self.session = ort.InferenceSession(
             str(path), sess_options=options, providers=["CPUExecutionProvider"]
         )
+        inputs, outputs = self.session.get_inputs(), self.session.get_outputs()
+
+        def compatible(shape, expected):
+            # MMDeploy may use symbolic batch/keypoint dimensions. Check known
+            # metadata here and validate actual SimCC tensors on every inference.
+            return len(shape) == len(expected) and all(
+                not isinstance(value, int) or value == size
+                for value, size in zip(shape, expected)
+            )
+
+        if (
+            len(inputs) != 1
+            or not compatible(inputs[0].shape, [1, 3, 256, 192])
+            or inputs[0].type != "tensor(float)"
+            or len(outputs) != 2
+            or not compatible(outputs[0].shape, [1, 17, 384])
+            or not compatible(outputs[1].shape, [1, 17, 512])
+            or any(output.type != "tensor(float)" for output in outputs)
+        ):
+            raise ValueError("Unsupported 17-point pose model interface")
+
+    def inference(self, image):
+        outputs = super().inference(image)
+        if (
+            len(outputs) != 2
+            or outputs[0].shape != (1, 17, 384)
+            or outputs[1].shape != (1, 17, 512)
+            or any(not np.isfinite(value).all() for value in outputs)
+        ):
+            raise ValueError("Unsupported or non-finite 17-point pose output")
+        return outputs
 
 
 class PersonDetector:
@@ -97,6 +128,8 @@ def atomic_json(path, value):
 
 def analyze(source, config, output, progress):
     started = time.monotonic()
+    pose_model = config.get("poseModel", "RTMPOSE_TINY")
+    selected_pose = pose_spec(pose_model)
     detection_mode = config.get("detectionMode", "FULL_FRAME")
     if detection_mode not in ("FULL_FRAME", "SEAT_FOCUS"):
         raise ValueError("Unsupported detection mode")
@@ -108,8 +141,11 @@ def analyze(source, config, output, progress):
     artifacts = manifest()
     if not artifacts:
         raise ValueError("Model artifacts are missing or have changed")
+    atomic_json(progress, {"progress": 0, "phase": "PREPARING_POSE"})
+    pose_record = prepare_pose(pose_model)
     detector = PersonDetector(MODEL_DIR / "detector.onnx")
-    pose = CpuPose(MODEL_DIR / "pose.onnx")
+    pose = CpuPose(MODEL_DIR / f"{selected_pose['file']}.onnx")
+    atomic_json(progress, {"progress": 0, "phase": "ANALYZING"})
     tracker = sv.ByteTrack(
         track_activation_threshold=MIN_DETECTION_SCORE,
         frame_rate=2,
@@ -248,12 +284,16 @@ def analyze(source, config, output, progress):
     report = {
         "mode": "RECORDED_VIDEO_DRY_RUN",
         "detectionMode": detection_mode,
+        "poseModel": pose_model,
         "sourceId": config["sourceId"],
         "models": {
             "detector": "YOLOX-tiny (HumanArt ONNX)",
-            "pose": "RTMPose-t (body7 ONNX)",
+            "pose": selected_pose["label"],
             "tracker": "ByteTrack (supervision 0.25.1)",
-            "artifacts": {k: v["sha256"] for k, v in artifacts.items()},
+            "artifacts": {
+                "detector": artifacts["detector"]["sha256"],
+                "pose": pose_record["sha256"],
+            },
         },
         "startSeconds": first,
         "endSeconds": last_timestamp,
