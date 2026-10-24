@@ -8,7 +8,7 @@ import numpy as np
 import supervision as sv
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from person_duplicates import suppress_aligned_torsos
+from person_duplicates import suppress_aligned_torsos, suppress_pose_duplicates
 
 
 def detections(boxes, scores):
@@ -20,6 +20,58 @@ def detections(boxes, scores):
 
 
 class PersonDuplicateTests(unittest.TestCase):
+    def pose_rows(self, boxes, scores):
+        rows = detections(boxes, scores)
+        points = np.zeros((len(boxes), 17, 3), np.float32)
+        points[:, :, 2] = 0.9
+        points[:, 5, :2] = [130, 140]
+        points[:, 6, :2] = [170, 140]
+        rows.data = {"keypoints": points, "row": np.arange(len(boxes))}
+        return rows
+
+    def test_near_identical_pose_boxes_keep_one_complete_row_and_own_score(self):
+        rows = self.pose_rows([[100, 100, 200, 300], [101, 101, 201, 301]], [0.45, 0.8])
+        rows.data["keypoints"][0, 11, 0] = 150
+        rows.data["keypoints"][1, 11, 0] = 175
+        result = suppress_pose_duplicates(rows)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result.data["row"].tolist(), [1])
+        np.testing.assert_array_equal(
+            result.data["keypoints"], rows.data["keypoints"][1:]
+        )
+        np.testing.assert_array_equal(result.confidence, rows.confidence[1:])
+        self.assertEqual(len(rows), 2)
+
+    def test_overlapping_people_with_distinct_shoulders_are_not_merged(self):
+        for change in ("height", "width", "weak", "shoulder-x", "shoulder-y"):
+            with self.subTest(change=change):
+                rows = self.pose_rows(
+                    [[100, 100, 200, 300], [101, 101, 201, 301]], [0.8, 0.7]
+                )
+                if change == "height":
+                    rows.xyxy[1, 3] = 360
+                if change == "width":
+                    rows.xyxy[1, 2] = 180
+                if change == "weak":
+                    rows.data["keypoints"][1, 5, 2] = 0.39
+                if change == "shoulder-x":
+                    rows.data["keypoints"][1, 5:7, 0] += 25
+                if change == "shoulder-y":
+                    rows.data["keypoints"][1, 5:7, 1] += 30
+                self.assertEqual(len(suppress_pose_duplicates(rows)), 2)
+
+    def test_pose_filter_does_not_merge_through_a_suppressed_middle_row(self):
+        rows = self.pose_rows(
+            [[100, 100, 200, 300], [103, 100, 203, 300], [106, 100, 206, 300]],
+            [0.9, 0.8, 0.7],
+        )
+        result = suppress_pose_duplicates(rows)
+        self.assertEqual(result.data["row"].tolist(), [0, 2])
+
+    def test_pose_filter_leaves_legacy_detections_without_keypoints_unchanged(self):
+        rows = detections([[100, 100, 200, 300], [101, 101, 201, 301]], [0.8, 0.7])
+        self.assertIs(suppress_pose_duplicates(rows), rows)
+
     def test_aligned_torso_keeps_longer_body_and_its_own_score_in_either_order(self):
         body, torso = [100, 100, 200, 400], [101, 101, 199, 300]
         for boxes, scores in (

@@ -942,7 +942,7 @@ class RuntimeTests(unittest.TestCase):
                     self.assertNotIn("seatTrial", baseline)
                     self.assertTrue(report["seatTrial"])
                     self.assertEqual(
-                        report["seatPolicy"]["version"], "SEAT_REVALIDATION_V1"
+                        report["seatPolicy"]["version"], "SEAT_REVALIDATION_V2"
                     )
                     self.assertEqual(report["events"], baseline["events"])
                     for sample, original in zip(report["samples"], baseline["samples"]):
@@ -1031,6 +1031,37 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(
                 sum(job["report"]["samples"][-1]["seatCounts"].values()), 1
             )
+
+    def test_focused_empty_pose_detections_remain_unknown_with_seat_trial_enabled(self):
+        name = yolo26_models.SMALL_MODEL
+        record = self.yolo26_model(name)
+        selected = yolo26_models.spec(name)
+        model = self.bundle_dir / f"{selected['file']}.onnx"
+        constant_graph(
+            model, [1, 3, 640, 640], {"output0": np.zeros((1, 300, 57), np.float32)}
+        )
+        record["sha256"] = models.digest(model)
+        (self.bundle_dir / f"{selected['file']}.json").write_text(json.dumps(record))
+        out = self.root / "empty-focus.json"
+        analyze.analyze(
+            self.source,
+            {
+                **self.config,
+                "poseModel": name,
+                "detectionMode": "SEAT_FOCUS",
+                "seatTrial": True,
+            },
+            out,
+            self.root / "progress",
+        )
+        report = json.loads(out.read_text())
+        self.assertEqual(report["events"], [])
+        self.assertTrue(
+            all(
+                not s["people"] and sum(s["seatCounts"].values()) == 0
+                for s in report["samples"]
+            )
+        )
 
     def test_black_frames_stay_unknown_even_with_constant_detection_graph(self):
         source = self.root / "black.avi"

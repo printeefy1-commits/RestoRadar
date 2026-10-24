@@ -723,7 +723,9 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                   <p className="muted">
                     نتحقق أولًا من دليل قوي لخمس ثوانٍ للشخص والمقعد نفسيهما. تستخدم التجربة
                     الوضعية، وتضيف دليل المعصمين عند تفعيله. عند انقطاع قصير تبقى الحالة غير محسومة
-                    حتى يعود رصد قوي ووضعية جلوس مقبولة خلال ثانيتين. النتائج تجريبية مستقلة.
+                    حتى يعود رصد قوي ووضعية جلوس مقبولة خلال ثانيتين. النتائج تجريبية مستقلة. عند
+                    تداخل الأشخاص يُفحص حجب الساقين لمن سبق التحقق من جلوسه، مع اشتراط دليل معصمين
+                    حالي؛ لا يُثبت العدد عند غياب الدليل.
                   </p>
                 )}
                 {!tables.length ? (
@@ -1190,12 +1192,21 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                                       ` · إعادة تحقق بعد ${person.seatEvidence.gapSeconds.toFixed(1)} ثانية`}
                                     {person.seatEvidence.revalidationPending &&
                                       ' · تاريخ محفوظ مؤقتًا؛ غير محسوب حاليًا'}
+                                    {person.seatEvidence.postureGuard === 'OCCLUDED_LOWER_BODY' &&
+                                      ' · احتمال حجب مفاصل الساق؛ يُفحص دليل المعصمين بصورة مستقلة'}
+                                    {person.seatEvidence.postureGuard === 'LEG_CHAIN' &&
+                                      ' · تدعم مفاصل الساقين استبعاد الوقوف'}
+                                    {person.seatEvidence.wristState &&
+                                      ` · مدة إشارة المعصمين لهذه التجربة ${(person.seatEvidence.wristStableSeconds ?? 0).toFixed(1)} ثانية`}
+                                    {person.seatEvidence.wristReason &&
+                                      ` · ${wristReasonLabels[person.seatEvidence.wristReason]}`}
                                   </p>
                                 ),
                             )}
                             <small className="muted">
                               كل مقعد يُحسب مرة واحدة. الصفر لا يثبت فراغ المقاعد أو المغادرة. تبقى
-                              إشارات المعصمين وتأكيدات الطاولات منفصلة للمقارنة.
+                              إشارات المعصمين وتأكيدات الطاولات منفصلة للمقارنة. لقطات الانقطاع تخص
+                              مؤقت المعصمين الأصلي.
                             </small>
                           </section>
                         )}

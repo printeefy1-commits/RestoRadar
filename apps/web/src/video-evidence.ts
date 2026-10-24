@@ -16,6 +16,7 @@ export const seatReasonLabels: Record<SeatEvidence['reason'], string> = {
   AMBIGUOUS_SEAT: 'تعارض مناطق المقاعد',
   SEAT_CONFLICT: 'أكثر من تتبع محتمل للمقعد نفسه',
   POSE_UNCERTAIN: 'لا يوجد دليل جلوس حالي كافٍ',
+  POSTURE_UNCERTAIN: 'وقوف سابق قريب؛ الوضعية الحالية غير محسومة',
   WRIST_DWELLING: 'بانتظار تحقق دليل المعصمين',
   POSE_MOVING: 'بدأت مدة جديدة بعد تحرك الحوض',
   DWELLING: 'بانتظار خمس ثوانٍ من دليل الوضعية',

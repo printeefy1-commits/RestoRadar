@@ -502,7 +502,9 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
         });
       if (submitted!.seatTrial) {
         report.seatPolicy = {
-          version: 'SEAT_REVALIDATION_V1',
+          version: 'SEAT_REVALIDATION_V2',
+          occlusionPolicy: 'KNOWN_SEATED_LOWER_BODY_V1',
+          wristSupportPolicy: 'WRIST_SEAT_DWELL_V4',
           seatingSeconds: 5,
           minDetectionScore: 0.35,
           minKeypointScore: 0.4,
@@ -530,6 +532,10 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
               resumed: false,
               revalidationPending: false,
               gapSeconds: 0,
+              postureGuard: qualified ? 'OCCLUDED_LOWER_BODY' : 'NONE',
+              wristState: qualified ? 'PROBABLE' : 'UNKNOWN',
+              wristReason: qualified ? 'PROBABLE' : 'LOW_DETECTION_SCORE',
+              wristStableSeconds: qualified ? 5 : 0,
             };
           }
         }
@@ -749,6 +755,8 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
   const seatPanel = page.getByRole('region', { name: 'تثبيت الجلوس لكل مقعد', exact: true });
   await expect(seatPanel).toContainText('جلوس مرجّح لكل المقاعد: 1');
   await expect(seatPanel).toContainText('جلوس مرجّح بدليل المعصمين المتحقق');
+  await expect(seatPanel).toContainText('احتمال حجب مفاصل الساق');
+  await expect(seatPanel).toContainText('مدة إشارة المعصمين لهذه التجربة 5.0 ثانية');
   await page.getByRole('checkbox', { name: 'تجربة تثبيت الجلوس لكل مقعد', exact: true }).uncheck();
   await expect(seatPanel).toBeVisible(); // A retained report describes its submitted configuration.
   const reviewDownload = page.waitForEvent('download');

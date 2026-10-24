@@ -26,8 +26,13 @@ from focused_detection import (
     MAX_FOCUS_TABLES,
     detect_with_seat_focus,
 )
-from wrist_trial import WRIST_POLICY, WristTrial, wrist_observation
-from person_duplicates import PERSON_MERGE_POLICY, suppress_aligned_torsos
+from wrist_trial import WRIST_POLICY, WristTrial, wrist_observation, reliable
+from person_duplicates import (
+    PERSON_MERGE_POLICY,
+    POSE_MERGE_POLICY,
+    suppress_aligned_torsos,
+    suppress_pose_duplicates,
+)
 import yolo26_models
 from seat_trial import SEAT_POLICY, SeatTrial, seat_observation
 
@@ -217,6 +222,7 @@ class Yolo26PoseDetector(PersonDetector):
             class_id=np.zeros(int(valid.sum()), dtype=int),
             data={"keypoints": points[valid]},
         )
+        detected = suppress_pose_duplicates(detected)
         detected = suppress_aligned_torsos(detected)
         return detected[np.argsort(-detected.confidence, kind="stable")[:30]]
 
@@ -270,7 +276,14 @@ def analyze(source, config, output, progress):
     wrist_enabled = config.get("wristTrial", False)
     wrist_verifier = WristTrial(table_ids) if wrist_enabled else None
     seat_enabled = config.get("seatTrial", False)
-    seat_verifier = SeatTrial(config["regions"]) if seat_enabled else None
+    seat_verifier = (
+        SeatTrial(
+            config["regions"],
+            config.get("tabletopRegions", []) if wrist_enabled else [],
+        )
+        if seat_enabled
+        else None
+    )
     samples, events = [], []
     first = config["startSeconds"]
     end = first + config["durationSeconds"]
@@ -305,6 +318,7 @@ def analyze(source, config, output, progress):
             )
             occupied, people = set(), []
             seat_observations = []
+            occluders = None
             detected_boxes = 0
             focus_crops = 0
             if image_ok:
@@ -315,6 +329,28 @@ def analyze(source, config, output, progress):
                 else:
                     detections = detector(frame)
                 detected_boxes = len(detections)
+                if seat_enabled and single_pass and len(detections):
+                    occluders = []
+                    for box, score, kp in zip(
+                        detections.xyxy,
+                        detections.confidence,
+                        detections.data["keypoints"],
+                    ):
+                        if score >= MIN_DETECTION_SCORE and all(
+                            reliable(kp[:, :2], kp[:, 2], i) for i in (5, 6)
+                        ):
+                            occluders.append(
+                                {
+                                    "box": [
+                                        float(box[i] / (w if i % 2 == 0 else h))
+                                        for i in range(4)
+                                    ],
+                                    "upperAnchor": [
+                                        float((kp[5, 0] + kp[6, 0]) / (2 * w)),
+                                        float((kp[5, 1] + kp[6, 1]) / (2 * h)),
+                                    ],
+                                }
+                            )
                 tracked = tracker.update_with_detections(detections)
                 if len(tracked):
                     # Never call RTMPose with an empty bbox array: it would infer on the whole frame.
@@ -427,7 +463,7 @@ def analyze(source, config, output, progress):
                 samples[-1]["wristResets"] = wrist_verifier.resets
             if seat_verifier:
                 samples[-1]["seatCounts"] = seat_verifier.observe(
-                    seconds, people, seat_observations
+                    seconds, people, seat_observations, occluders
                 )
             atomic_json(
                 progress,
@@ -480,6 +516,8 @@ def analyze(source, config, output, progress):
     }
     if detection_mode == "SEAT_FOCUS":
         report["focusMergePolicy"] = FOCUS_MERGE_POLICY
+    if single_pass:
+        report["poseMergePolicy"] = POSE_MERGE_POLICY
     if wrist_enabled:
         report.update(
             wristTrial=True,

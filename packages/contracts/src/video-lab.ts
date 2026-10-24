@@ -133,6 +133,7 @@ export interface SeatEvidence {
     | 'AMBIGUOUS_SEAT'
     | 'SEAT_CONFLICT'
     | 'POSE_UNCERTAIN'
+    | 'POSTURE_UNCERTAIN'
     | 'WRIST_DWELLING'
     | 'POSE_MOVING'
     | 'DWELLING'
@@ -151,6 +152,10 @@ export interface SeatEvidence {
   resumed: boolean;
   revalidationPending: boolean;
   gapSeconds: number;
+  postureGuard?: 'NONE' | 'TORSO_ANGLE' | 'LEG_CHAIN' | 'OCCLUDED_LOWER_BODY' | 'RECENT_STANDING';
+  wristState?: 'UNKNOWN' | 'CANDIDATE' | 'PROBABLE';
+  wristReason?: WristEvidence['reason'];
+  wristStableSeconds?: number;
 }
 export interface WristMotionFailure {
   check:
@@ -191,6 +196,7 @@ export interface TrialReport {
   sourceId: string;
   detectorModel?: 'YOLO11_LARGE' | 'YOLO26_NANO_POSE' | 'YOLO26_SMALL_POSE';
   personMergePolicy?: 'STRICT_UPPER_BODY_ALIGNMENT_V1';
+  poseMergePolicy?: 'NEAR_IDENTICAL_BOX_AND_SHOULDERS_V1';
   models: { detector: string; pose: string; tracker: string; artifacts: Record<string, string> };
   startSeconds: number;
   endSeconds: number;
@@ -208,7 +214,9 @@ export interface TrialReport {
   wristTrial?: boolean;
   seatTrial?: boolean;
   seatPolicy?: {
-    version: 'SEAT_REVALIDATION_V1';
+    version: 'SEAT_REVALIDATION_V1' | 'SEAT_REVALIDATION_V2';
+    occlusionPolicy?: 'KNOWN_SEATED_LOWER_BODY_V1';
+    wristSupportPolicy?: 'WRIST_SEAT_DWELL_V4';
     seatingSeconds: number;
     minDetectionScore: number;
     minKeypointScore: number;

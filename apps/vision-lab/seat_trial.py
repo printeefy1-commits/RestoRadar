@@ -9,10 +9,18 @@ from decisions import (
     duration_reached,
     matching_tables,
 )
-from wrist_trial import reliable, visibly_standing
+from wrist_trial import reliable, visibly_standing, WristTrial, wrist_observation
+from occlusion import (
+    OCCLUSION_POLICY,
+    occluded_knees,
+    supported_standing_legs,
+    recent_standing_ambiguity,
+)
 
 SEAT_POLICY = {
-    "version": "SEAT_REVALIDATION_V1",
+    "version": "SEAT_REVALIDATION_V2",
+    "occlusionPolicy": OCCLUSION_POLICY,
+    "wristSupportPolicy": "WRIST_SEAT_DWELL_V4",
     "seatingSeconds": 5,
     "minDetectionScore": MIN_DETECTION_SCORE,
     "minKeypointScore": MIN_KEYPOINT_SCORE,
@@ -42,6 +50,18 @@ def seat_observation(points, scores, detection_score, regions, width, height):
         else None
     )
     return {
+        "points": points,
+        "scores": scores,
+        "width": width,
+        "height": height,
+        "upperAnchor": (
+            [
+                (float(points[5][0]) + float(points[6][0])) / (2 * width),
+                (float(points[5][1]) + float(points[6][1])) / (2 * height),
+            ]
+            if all(reliable(points, scores, i) for i in (5, 6))
+            else None
+        ),
         "score": (
             float(detection_score)
             if math.isfinite(detection_score) and 0 <= detection_score <= 1
@@ -58,12 +78,17 @@ def seat_observation(points, scores, detection_score, regions, width, height):
 
 
 class SeatTrial:
-    def __init__(self, regions):
+    def __init__(self, regions, tabletops=None):
         self.regions = {r["id"]: r for r in regions}
+        self.tabletops = tabletops or []
+        self.wrists = (
+            WristTrial({r["tableId"] for r in regions}) if self.tabletops else None
+        )
         self.history = {}
+        self.standing_recent = {}
         self.last_time = None
 
-    def observe(self, seconds, people, observations):
+    def observe(self, seconds, people, observations, occluders=None):
         if not math.isfinite(seconds) or (
             self.last_time is not None and seconds <= self.last_time
         ):
@@ -74,9 +99,107 @@ class SeatTrial:
             self.last_time, seconds, SEAT_POLICY["maxSampleGapSeconds"]
         ):
             self.history.clear()
+            self.standing_recent.clear()
         self.last_time = seconds
-        entries = []
+        observations = [dict(o) for o in observations]
+        context = (
+            occluders
+            if occluders is not None
+            else [
+                {"box": p["box"], "upperAnchor": o.get("upperAnchor")}
+                for p, o in zip(people, observations)
+                if o["score"] is not None and o["score"] >= MIN_DETECTION_SCORE
+            ]
+        )
+        support = []
+        standing_current = {}
         for person, obs in zip(people, observations):
+            previous = self.history.get(person["trackId"], {})
+            same_seat = (
+                previous.get("seat") in obs["matches"]
+                and len(obs["matches"]) == 1
+                and previous.get("qualifiedAt") is not None
+                and within_duration(
+                    previous["lastValid"],
+                    seconds,
+                    SEAT_POLICY["maxRevalidationSeconds"],
+                )
+            )
+            blocked = occluded_knees(
+                obs,
+                person["box"],
+                context,
+                previous.get("poseReference") if same_seat else None,
+            )
+            scores = obs["scores"].copy()
+            for i in blocked:
+                scores[i] = 0
+            torso_standing = visibly_standing(obs["points"], scores)
+            leg_standing = supported_standing_legs(obs["points"], scores)
+            obs["standing"] = torso_standing or leg_standing
+            obs["postureGuard"] = (
+                "TORSO_ANGLE"
+                if torso_standing
+                else (
+                    "LEG_CHAIN"
+                    if leg_standing
+                    else "OCCLUDED_LOWER_BODY" if blocked else "NONE"
+                )
+            )
+            recent = self.standing_recent.get(person["trackId"])
+            if (
+                obs["standing"]
+                and obs["score"] is not None
+                and obs["score"] >= MIN_DETECTION_SCORE
+                and obs["hipAnchor"] is not None
+                and obs["upperAnchor"] is not None
+            ):
+                standing_current[person["trackId"]] = {
+                    "seconds": seconds,
+                    "hip": obs["hipAnchor"][:],
+                    "upper": obs["upperAnchor"][:],
+                    "box": person["box"][:],
+                }
+            elif (
+                not obs["standing"]
+                and not (
+                    person.get("evidence") == "ACCEPTED"
+                    and all(reliable(obs["points"], obs["scores"], i) for i in (13, 14))
+                )
+                and recent_standing_ambiguity(
+                    obs, person["box"], context, recent, seconds
+                )
+            ):
+                obs["standing"] = True
+                obs["postureGuard"] = "RECENT_STANDING"
+                standing_current[person["trackId"]] = recent
+            copy = dict(person)
+            if self.wrists:
+                copy["wristEvidence"] = wrist_observation(
+                    obs["points"],
+                    scores,
+                    [
+                        person["box"][i]
+                        * (obs["width"] if i % 2 == 0 else obs["height"])
+                        for i in range(4)
+                    ],
+                    person["trackId"],
+                    obs["score"] if obs["score"] is not None else float("nan"),
+                    list(self.regions.values()),
+                    self.tabletops,
+                    obs["width"],
+                    obs["height"],
+                )
+                if obs["standing"]:
+                    copy["wristEvidence"].update(
+                        state="UNKNOWN", reason="STANDING", seatRegionId=None
+                    )
+            support.append(copy)
+        if self.wrists:
+            self.wrists.observe(seconds, support)
+        self.standing_recent = standing_current
+        entries = []
+        for person, obs in zip(support, observations):
             wrist = person.get("wristEvidence", {})
             strong = obs["score"] is not None and obs["score"] >= MIN_DETECTION_SCORE
             wrist_seat = self.regions.get(wrist.get("seatRegionId"))
@@ -95,14 +218,23 @@ class SeatTrial:
                 else wrist_seat["id"] if wrist_ready else None
             )
             claims = (
-                [] if obs["standing"] else [selected] if wrist_ready else obs["matches"]
+                []
+                if obs["standing"]
+                or not strong
+                or not (
+                    person.get("evidence") == "ACCEPTED"
+                    or wrist.get("state") in ("CANDIDATE", "PROBABLE")
+                )
+                else [selected] if wrist_ready else obs["matches"]
             )
             entries.append((person, obs, strong, wrist_ready, selected, claims))
         seats = Counter(seat for *_, claims in entries for seat in claims)
         tracks = Counter(p["trackId"] for p in people if p["trackId"] is not None)
         current = {}
         counts = {r["tableId"]: 0 for r in self.regions.values()}
-        for person, obs, strong, wrist_ready, seat_id, claims in entries:
+        for original, (person, obs, strong, wrist_ready, seat_id, claims) in zip(
+            people, entries
+        ):
             track = person["trackId"]
             region = self.regions.get(seat_id)
             cue = {
@@ -119,13 +251,25 @@ class SeatTrial:
                 "resumed": False,
                 "revalidationPending": False,
                 "gapSeconds": 0,
+                "postureGuard": obs["postureGuard"],
+                "wristState": person.get("wristEvidence", {}).get("state", "UNKNOWN"),
+                "wristReason": person.get("wristEvidence", {}).get(
+                    "reason", "WRIST_UNCERTAIN"
+                ),
+                "wristStableSeconds": person.get("wristEvidence", {}).get(
+                    "stableSeconds", 0
+                ),
             }
-            person["seatEvidence"] = cue
+            original["seatEvidence"] = cue
             if track is None:
                 cue["reason"] = "NO_TRACK"
                 continue
             if obs["standing"]:
-                cue["reason"] = "STANDING"
+                cue["reason"] = (
+                    "POSTURE_UNCERTAIN"
+                    if obs["postureGuard"] == "RECENT_STANDING"
+                    else "STANDING"
+                )
                 continue
             if obs["score"] is None:
                 cue["reason"] = "LOW_DETECTION_SCORE"
@@ -137,7 +281,9 @@ class SeatTrial:
                 cue["reason"] = (
                     "HIP_UNCERTAIN"
                     if obs["hipAnchor"] is None
-                    else "AMBIGUOUS_SEAT" if claims else "NO_SEAT_MATCH"
+                    else (
+                        "AMBIGUOUS_SEAT" if len(obs["matches"]) > 1 else "NO_SEAT_MATCH"
+                    )
                 )
                 continue
             previous = self.history.get(track)
@@ -231,6 +377,16 @@ class SeatTrial:
             pose_qualified = pose_ready and duration_reached(
                 record["poseStart"], seconds, SEAT_POLICY["seatingSeconds"]
             )
+            if (
+                pose_qualified
+                and "poseReference" not in record
+                and obs.get("upperAnchor") is not None
+            ):
+                record["poseReference"] = {
+                    "hip": obs["hipAnchor"][:],
+                    "upper": obs["upperAnchor"][:],
+                    "box": person["box"][:],
+                }
             cue["source"] = (
                 "BOTH"
                 if pose_ready and wrist_ready
