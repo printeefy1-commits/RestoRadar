@@ -849,7 +849,8 @@ test('owner uploads, replaces and deletes videos from the browser without changi
   await login(page, 'owner@e2e.invalid');
   const data = await readFile(new URL('../fixtures/trial-preview.mp4', import.meta.url));
   const original = { id: 'c'.repeat(64), duration: 6, width: 640, height: 360, bytes: data.length };
-  let source: typeof original & { uploaded?: boolean; name?: string } = original;
+  let source: typeof original & { uploaded?: boolean; name?: string; converted?: boolean } =
+    original;
   let mode: 'success' | 'invalid' | 'network' | 'cancel' = 'success';
   let releaseUpload: (() => void) | undefined;
   let uploads = 0,
@@ -884,6 +885,7 @@ test('owner uploads, replaces and deletes videos from the browser without changi
         ...original,
         id: (uploads === 1 ? 'd' : 'e').repeat(64),
         uploaded: true,
+        converted: true,
         name: decodeURIComponent(request.headers()['x-video-name']),
       };
       return route.fulfill({ status: 201, json: source });
@@ -930,6 +932,9 @@ test('owner uploads, replaces and deletes videos from the browser without changi
   await choose.setInputFiles(file('camera.mp4'));
   await page.getByRole('button', { name: 'رفع الفيديو', exact: true }).click();
   await expect(page.getByText('الفيديو المرفوع: camera.mp4', { exact: true })).toBeVisible();
+  await expect(
+    page.getByText('تمت تهيئة الفيديو تلقائيًا للعرض والتحليل.', { exact: true }),
+  ).toBeVisible();
   await expect(page.getByRole('button', { name: 'حذف المنطقة 1', exact: true })).toHaveCount(0);
   await expect(page.locator('video')).toHaveAttribute('src', new RegExp(source.id));
   const uploadedId = source.id;

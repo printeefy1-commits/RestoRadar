@@ -148,7 +148,7 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
     try {
       await new Promise<void>((resolve, reject) => {
         xhr.open('POST', `${base}/video`);
-        xhr.timeout = 180000;
+        xhr.timeout = 900000;
         xhr.setRequestHeader('Content-Type', 'video/mp4');
         xhr.setRequestHeader('X-Video-Name', encodeURIComponent(uploadFile.name));
         xhr.upload.onprogress = (event) => {
@@ -449,9 +449,10 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
             )}
             <section aria-label="إدارة فيديو التجربة">
               <p className="muted">
-                ارفع فيديو MP4 بترميز H.264، حتى 100 ميغابايت ومدته ست ثوانٍ على الأقل. يُرسل إلى
-                الخادم لتحليله ويبقى حتى تحذفه أو تستبدله. الرفع الجديد يستبدل الفيديو المرفوع
-                السابق بعد فحصه، ويُبقي فيديو التجربة الأصلي محفوظًا.
+                ارفع فيديو MP4 حتى 100 ميغابايت ومدته ست ثوانٍ على الأقل. تدعم الصفحة تسجيلات Xiaomi
+                بترميز H.265/HEVC وتجهزها تلقائيًا للعرض، للمقاطع حتى دقيقتين. يُرسل إلى الخادم
+                لتحليله ويبقى حتى تحذفه أو تستبدله. الرفع الجديد يستبدل الفيديو المرفوع السابق بعد
+                فحصه، ويُبقي فيديو التجربة الأصلي محفوظًا.
               </p>
               <label>
                 اختيار فيديو من الجهاز
@@ -477,7 +478,7 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                   <p role="status">
                     {uploadProgress < 100
                       ? `جارٍ رفع الفيديو: ${uploadProgress}%`
-                      : 'اكتمل النقل؛ جارٍ فحص الفيديو…'}
+                      : 'اكتمل النقل؛ جارٍ فحص الفيديو وتهيئته للعرض تلقائيًا. قد يستغرق ذلك بضع دقائق…'}
                   </p>
                   <progress aria-label="تقدم رفع الفيديو" value={uploadProgress} max={100} />
                   <button className="secondary" onClick={() => uploadRequest.current?.abort()}>
@@ -488,6 +489,9 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
               {status.source?.uploaded && (
                 <>
                   <p>الفيديو المرفوع: {status.source.name ?? 'video.mp4'}</p>
+                  {status.source.converted && (
+                    <p className="muted">تمت تهيئة الفيديو تلقائيًا للعرض والتحليل.</p>
+                  )}
                   <button
                     className="secondary"
                     disabled={running || !!reviewProgress}

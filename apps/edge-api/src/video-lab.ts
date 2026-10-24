@@ -114,7 +114,7 @@ export async function registerVideoLab(
           if (!reply.raw.writableFinished) abort();
         };
         reply.raw.once('close', closed);
-        const timer = setTimeout(abort, 180000);
+        const timer = setTimeout(abort, 900000);
         let streamError: Error | undefined;
         let bytes = 0;
         const body = Readable.from(

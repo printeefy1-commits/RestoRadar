@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from models import digest, prepare
 from decisions import MAX_FOCUS_TABLES
 from media import MAX_UPLOAD_BYTES, MAX_STORAGE_BYTES, MediaStore
+from video_conversion import MAX_CONVERSION_SECONDS, prepare_browser_video
 
 ROOT = Path(__file__).resolve().parent
 SOURCE = Path(os.environ.get("VIDEO_SAMPLE_PATH", "/recordings/restaurant-demo.mp4"))
@@ -132,10 +133,9 @@ def sample(path=None, upload=False):
         stream = info["streams"][0]
         if upload and (
             "mp4" not in info["format"]["format_name"].split(",")
-            or stream["codec_name"] != "h264"
-            or stream["pix_fmt"] not in ("yuv420p", "yuvj420p")
+            or stream["codec_name"] not in ("h264", "hevc")
         ):
-            raise HTTPException(422, "استخدم فيديو MP4 بترميز H.264 وألوان 8-bit 4:2:0")
+            raise HTTPException(422, "استخدم فيديو MP4 بترميز H.264 أو H.265/HEVC")
         value = {
             "id": digest(path),
             "duration": float(info["format"]["duration"]),
@@ -143,6 +143,8 @@ def sample(path=None, upload=False):
             "height": int(stream["height"]),
             "bytes": stat.st_size,
         }
+        if upload:
+            value.update(codec=stream["codec_name"], pixelFormat=stream["pix_fmt"])
         if (
             not 0 < value["duration"] <= 86400
             or min(value["width"], value["height"]) < 100
@@ -317,7 +319,7 @@ async def upload_video(restaurant_id: UUID, request: Request):
         if active or media_busy or stopping:
             raise HTTPException(409, "انتظر اكتمال التحليل أو رفع الفيديو الجاري")
         media_busy = True
-    path = None
+    path = converted = None
     try:
         handle, used = uploads.begin()
         path = Path(handle.name)
@@ -335,18 +337,55 @@ async def upload_video(restaurant_id: UUID, request: Request):
                     handle.write(chunk)
             if not size or (length and size != int(length)):
                 raise HTTPException(422, "لم يصل ملف فيديو كامل")
-            info = await run_in_threadpool(sample, path, True)
-            if info["duration"] < 6:
-                raise HTTPException(422, "اختر فيديو مدته ست ثوانٍ على الأقل")
-            if await request.is_disconnected():
-                raise HTTPException(400, "أُلغي الرفع قبل اعتماد الفيديو")
-            with lock:
-                return uploads.commit(
-                    restaurant_id,
-                    path,
-                    info,
-                    unquote(request.headers.get("x-video-name", "video.mp4")),
+        info = await run_in_threadpool(sample, path, True)
+        if info["duration"] < 6:
+            raise HTTPException(422, "اختر فيديو مدته ست ثوانٍ على الأقل")
+        if await request.is_disconnected():
+            raise HTTPException(400, "أُلغي الرفع قبل اعتماد الفيديو")
+        ready_path = path
+        if info["codec"] != "h264" or info["pixelFormat"] not in (
+            "yuv420p",
+            "yuvj420p",
+        ):
+            if info["duration"] > MAX_CONVERSION_SECONDS:
+                raise HTTPException(
+                    422,
+                    "التهيئة التلقائية تدعم مقطعًا حتى 120 ثانية؛ قصّر المقطع ثم ارفعه",
                 )
+            storage_limit = MAX_STORAGE_BYTES - used - size
+            if storage_limit <= 64 * 1024:
+                raise HTTPException(
+                    507, "لا توجد مساحة كافية لتهيئة الفيديو؛ احذف فيديو أولًا"
+                )
+            output_limit = min(MAX_UPLOAD_BYTES, storage_limit)
+            handle, _ = uploads.begin()
+            converted = Path(handle.name)
+            handle.close()
+            await prepare_browser_video(path, converted, output_limit, request)
+            output_info = await run_in_threadpool(sample, converted, True)
+            if (
+                output_info["bytes"] >= output_limit - 64 * 1024
+                or abs(output_info["duration"] - info["duration"]) > 0.5
+            ):
+                raise HTTPException(
+                    413, "النسخة المجهزة تجاوزت المساحة المتاحة؛ جرّب مقطعًا أقصر"
+                )
+            if output_info["codec"] != "h264" or output_info["pixelFormat"] not in (
+                "yuv420p",
+                "yuvj420p",
+            ):
+                raise HTTPException(422, "لم تكتمل تهيئة الفيديو بصيغة متوافقة")
+            info = {**output_info, "converted": True, "originalCodec": info["codec"]}
+            ready_path = converted
+        if await request.is_disconnected():
+            raise HTTPException(400, "أُلغي الرفع قبل اعتماد الفيديو")
+        with lock:
+            return uploads.commit(
+                restaurant_id,
+                ready_path,
+                info,
+                unquote(request.headers.get("x-video-name", "video.mp4")),
+            )
     except ClientDisconnect:
         raise HTTPException(400, "انقطع الاتصال قبل اكتمال رفع الفيديو") from None
     except TimeoutError:
@@ -357,8 +396,12 @@ async def upload_video(restaurant_id: UUID, request: Request):
         raise HTTPException(507, "تعذر حفظ الفيديو؛ تحقق من المساحة المتاحة") from None
     finally:
         try:
-            if path:
-                path.unlink(missing_ok=True)
+            try:
+                if converted:
+                    converted.unlink(missing_ok=True)
+            finally:
+                if path:
+                    path.unlink(missing_ok=True)
         finally:
             with lock:
                 media_busy = False

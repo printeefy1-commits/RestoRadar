@@ -61,6 +61,10 @@ export interface VideoLabStatus {
     bytes: number;
     uploaded?: boolean;
     name?: string;
+    converted?: boolean;
+    originalCodec?: 'h264' | 'hevc';
+    codec?: string;
+    pixelFormat?: string;
   } | null;
 }
 export type TrialEvidence =

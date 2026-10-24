@@ -60,6 +60,30 @@ class MediaTests(unittest.TestCase):
             check=True,
         )
         cls.other_video = alt.read_bytes()
+        camera = path.with_name("camera-hevc.mp4")
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-i",
+                str(path),
+                "-an",
+                "-c:v",
+                "libx265",
+                "-preset",
+                "ultrafast",
+                "-x265-params",
+                "pools=none:frame-threads=1:log-level=error",
+                "-pix_fmt",
+                "yuv420p",
+                "-threads",
+                "1",
+                str(camera),
+            ],
+            check=True,
+        )
+        cls.hevc = camera.read_bytes()
 
     @classmethod
     def tearDownClass(cls):
@@ -320,14 +344,14 @@ class MediaTests(unittest.TestCase):
         self.client.post(self.base + "/video/delete", json={"sourceId": info["id"]})
         self.assertIsNone(self.client.get(self.base + "/status").json()["source"])
 
-    def test_hevc_or_unsupported_pixels_are_rejected_before_commit(self):
+    def test_unsupported_codec_is_rejected_before_commit(self):
         info = {
             "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "8"},
             "streams": [
                 {
                     "width": 320,
                     "height": 240,
-                    "codec_name": "hevc",
+                    "codec_name": "av1",
                     "pix_fmt": "yuv420p",
                 }
             ],
@@ -339,6 +363,107 @@ class MediaTests(unittest.TestCase):
         ):
             self.assertEqual(self.upload().status_code, 422)
         self.assertIsNone(self.store.record(self.tenant))
+
+    def test_hevc_upload_is_prepared_once_and_stored_as_browser_h264(self):
+        old = self.upload().json()
+        result = self.upload(self.hevc, {"X-Video-Name": "xiaomi.mp4"})
+        self.assertEqual(result.status_code, 201, result.text)
+        info = result.json()
+        self.assertTrue(info["converted"])
+        self.assertEqual(info["originalCodec"], "hevc")
+        self.assertEqual(info["codec"], "h264")
+        self.assertEqual(info["pixelFormat"], "yuv420p")
+        self.assertAlmostEqual(info["duration"], 8, delta=0.2)
+        self.assertNotEqual(info["id"], old["id"])
+        path, stored = self.store.record(self.tenant)
+        self.assertEqual(stored, info)
+        self.assertEqual(service.sample(path, True)["codec"], "h264")
+        self.assertEqual(len(list(self.store.root.glob("*/*.mp4"))), 1)
+        self.assertEqual(list(self.store.root.glob("*.part")), [])
+        self.assertEqual(self.original.read_bytes(), self.video)
+        self.assertFalse(service.media_busy)
+
+    def test_failed_conversion_preserves_current_video_and_cleans_both_staging_files(
+        self,
+    ):
+        from fastapi import HTTPException
+
+        old = self.upload().json()
+
+        async def fail(*args):
+            raise HTTPException(422, "conversion failed")
+
+        with patch.object(service, "prepare_browser_video", fail):
+            self.assertEqual(self.upload(self.hevc).status_code, 422)
+        self.assertEqual(self.store.record(self.tenant)[1], old)
+        self.assertEqual(list(self.store.root.glob("*.part")), [])
+        self.assertFalse(service.media_busy)
+
+    def test_cancel_during_conversion_terminates_child_and_preserves_current(self):
+        from fastapi import HTTPException
+        import video_conversion
+
+        old = self.upload().json()
+        content = self.hevc
+        processes = []
+        real = video_conversion.asyncio.create_subprocess_exec
+
+        async def spawn(*args, **kwargs):
+            process = await real(*args, **kwargs)
+            processes.append(process)
+            return process
+
+        class Cancelled:
+            headers = {"content-type": "video/mp4"}
+            calls = 0
+
+            async def stream(self):
+                yield content
+
+            async def is_disconnected(self):
+                self.calls += 1
+                return self.calls >= 2
+
+        with patch.object(video_conversion.asyncio, "create_subprocess_exec", spawn):
+            with self.assertRaises(HTTPException) as error:
+                asyncio.run(service.upload_video(self.tenant, Cancelled()))
+        self.assertEqual(error.exception.status_code, 400)
+        self.assertEqual(len(processes), 1)
+        self.assertIsNotNone(processes[0].returncode)
+        self.assertEqual(self.store.record(self.tenant)[1], old)
+        self.assertEqual(list(self.store.root.glob("*.part")), [])
+        self.assertFalse(service.media_busy)
+
+    def test_conversion_timeout_terminates_and_cleans_without_replacing(self):
+        import video_conversion
+
+        old = self.upload().json()
+        with patch.object(video_conversion, "CONVERSION_TIMEOUT_SECONDS", 0):
+            self.assertEqual(self.upload(self.hevc).status_code, 504)
+        self.assertEqual(self.store.record(self.tenant)[1], old)
+        self.assertEqual(list(self.store.root.glob("*.part")), [])
+        self.assertFalse(service.media_busy)
+
+    def test_conversion_requires_storage_for_both_input_and_output(self):
+        old = self.upload().json()
+        with patch.object(
+            service, "MAX_STORAGE_BYTES", len(self.video) + len(self.hevc) + 1024
+        ):
+            self.assertEqual(self.upload(self.hevc).status_code, 507)
+        self.assertEqual(self.store.record(self.tenant)[1], old)
+        self.assertEqual(list(self.store.root.glob("*.part")), [])
+        self.assertFalse(service.media_busy)
+
+    def test_camera_clip_over_two_minutes_is_rejected_before_conversion(self):
+        old = self.upload().json()
+        fake = {**old, "codec": "hevc", "duration": 121}
+        with patch.object(service, "sample", return_value=fake), patch.object(
+            service, "prepare_browser_video"
+        ) as convert:
+            self.assertEqual(self.upload(self.hevc).status_code, 422)
+            convert.assert_not_called()
+        self.assertEqual(self.store.record(self.tenant)[1], old)
+        self.assertEqual(list(self.store.root.glob("*.part")), [])
 
 
 if __name__ == "__main__":
