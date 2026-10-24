@@ -338,6 +338,8 @@ async def upload_video(restaurant_id: UUID, request: Request):
             info = await run_in_threadpool(sample, path, True)
             if info["duration"] < 6:
                 raise HTTPException(422, "اختر فيديو مدته ست ثوانٍ على الأقل")
+            if await request.is_disconnected():
+                raise HTTPException(400, "أُلغي الرفع قبل اعتماد الفيديو")
             with lock:
                 return uploads.commit(
                     restaurant_id,
@@ -354,10 +356,12 @@ async def upload_video(restaurant_id: UUID, request: Request):
     except OSError:
         raise HTTPException(507, "تعذر حفظ الفيديو؛ تحقق من المساحة المتاحة") from None
     finally:
-        if path:
-            path.unlink(missing_ok=True)
-        with lock:
-            media_busy = False
+        try:
+            if path:
+                path.unlink(missing_ok=True)
+        finally:
+            with lock:
+                media_busy = False
 
 
 @app.post("/restaurants/{restaurant_id}/video/delete")

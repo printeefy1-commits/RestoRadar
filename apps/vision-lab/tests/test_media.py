@@ -260,6 +260,29 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(list(self.store.root.glob("*.part")), [])
         self.assertFalse(service.media_busy)
 
+    def test_cancel_after_receiving_file_does_not_commit_validated_replacement(self):
+        from fastapi import HTTPException
+
+        old = self.upload().json()
+        content = self.other_video
+
+        class CancelledDuringValidation:
+            headers = {"content-type": "video/mp4"}
+
+            async def stream(self):
+                yield content
+
+            async def is_disconnected(self):
+                return True
+
+        with self.assertRaises(HTTPException) as error:
+            asyncio.run(service.upload_video(self.tenant, CancelledDuringValidation()))
+        self.assertEqual(error.exception.status_code, 400)
+        self.assertEqual(self.store.record(self.tenant)[1], old)
+        self.assertEqual(len(list(self.store.root.glob("*/*.mp4"))), 1)
+        self.assertEqual(list(self.store.root.glob("*.part")), [])
+        self.assertFalse(service.media_busy)
+
     def test_failed_atomic_metadata_commit_rolls_back_new_file(self):
         old = self.upload().json()
         import media
