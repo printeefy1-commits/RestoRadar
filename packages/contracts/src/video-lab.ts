@@ -22,6 +22,7 @@ export const videoTrialSchema = z
       .enum(['RTMPOSE_TINY', 'RTMPOSE_MEDIUM', 'YOLO26_NANO_POSE', 'YOLO26_SMALL_POSE'])
       .optional(),
     wristTrial: z.boolean().optional(),
+    seatTrial: z.boolean().optional(),
     tabletopRegions: z.array(seatRegionSchema).max(40).optional(),
     regions: z.array(seatRegionSchema).min(1).max(40),
   })
@@ -91,6 +92,7 @@ export interface TrialPerson {
   evidence?: TrialEvidence;
   seatedAnchor?: [number, number] | null;
   wristEvidence?: WristEvidence;
+  seatEvidence?: SeatEvidence;
   posePoints?: {
     part:
       | 'LEFT_SHOULDER'
@@ -104,6 +106,36 @@ export interface TrialPerson {
     point: [number, number];
     score: number;
   }[];
+}
+export interface SeatEvidence {
+  state: 'UNKNOWN' | 'CANDIDATE' | 'PROBABLE';
+  reason:
+    | 'NO_TRACK'
+    | 'LOW_DETECTION_SCORE'
+    | 'STANDING'
+    | 'HIP_UNCERTAIN'
+    | 'NO_SEAT_MATCH'
+    | 'AMBIGUOUS_SEAT'
+    | 'SEAT_CONFLICT'
+    | 'POSE_UNCERTAIN'
+    | 'WRIST_DWELLING'
+    | 'POSE_MOVING'
+    | 'DWELLING'
+    | 'POSE_QUALIFIED'
+    | 'WRIST_QUALIFIED'
+    | 'BOTH_QUALIFIED'
+    | 'REVALIDATED';
+  source: 'POSE' | 'WRIST' | 'BOTH' | null;
+  tableId: string | null;
+  seatRegionId: string | null;
+  hipAnchor: [number, number] | null;
+  detectionScore: number | null;
+  poseSeconds: number;
+  qualifiedAtSeconds: number | null;
+  qualifiedBy: 'POSE' | 'WRIST' | 'BOTH' | null;
+  resumed: boolean;
+  revalidationPending: boolean;
+  gapSeconds: number;
 }
 export interface WristMotionFailure {
   check:
@@ -159,6 +191,18 @@ export interface TrialReport {
   };
   regions: SeatRegion[];
   wristTrial?: boolean;
+  seatTrial?: boolean;
+  seatPolicy?: {
+    version: 'SEAT_REVALIDATION_V1';
+    seatingSeconds: number;
+    minDetectionScore: number;
+    minKeypointScore: number;
+    maxRevalidationSeconds: number;
+    maxSampleGapSeconds: number;
+    initialHipDriftBoxWidths: number;
+    initialHipDriftBoxHeights: number;
+    revalidationRequires: 'CURRENT_SEATED_POSE_SAME_TRACK_AND_SEAT';
+  };
   tabletopRegions?: SeatRegion[];
   wristPolicy?: {
     version:
@@ -189,6 +233,7 @@ export interface TrialReport {
     tables: Record<string, 'OCCUPIED' | 'UNKNOWN'>;
     wristTables?: Record<string, 'PROBABLE' | 'UNKNOWN'>;
     wristResets?: WristReset[];
+    seatCounts?: Record<string, number>;
   }[];
 }
 export interface TrialJob {

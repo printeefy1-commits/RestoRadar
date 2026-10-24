@@ -122,6 +122,28 @@ class DecisionTests(unittest.TestCase):
 
 
 class FocusedDetectionTests(unittest.TestCase):
+    def test_seat_trial_is_opt_in_and_uses_strict_booleans(self):
+        trial = {
+            "sourceId": "a" * 64,
+            "startSeconds": 0,
+            "durationSeconds": 6,
+            "regions": [
+                {
+                    "id": str(uuid4()),
+                    "tableId": str(uuid4()),
+                    "x": 0,
+                    "y": 0,
+                    "width": 1,
+                    "height": 1,
+                }
+            ],
+        }
+        self.assertFalse(service.Trial(**trial).seatTrial)
+        self.assertTrue(service.Trial(**{**trial, "seatTrial": True}).seatTrial)
+        for value in ("true", 1, None):
+            with self.assertRaises(ValueError):
+                service.Trial(**{**trial, "seatTrial": value})
+
     def test_wrist_trial_requires_valid_separate_tabletops_of_seated_tables(self):
         seat = {
             "id": str(uuid4()),
@@ -889,6 +911,124 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse(reset["wasProbable"])
         self.assertAlmostEqual(reset["detectionScore"], 0.3265, places=6)
         self.assertEqual(report["events"], [])
+
+    def test_per_seat_trial_preserves_every_baseline_and_wrist_result(self):
+        self.yolo26_model(yolo26_models.SMALL_MODEL)
+        for model in ("RTMPOSE_TINY", yolo26_models.SMALL_MODEL):
+            for wrist in (False, True):
+                with self.subTest(model=model, wrist=wrist):
+                    config = {**self.config, "poseModel": model}
+                    if wrist:
+                        config.update(
+                            wristTrial=True,
+                            tabletopRegions=[
+                                {**self.config["regions"][0], "id": str(uuid4())}
+                            ],
+                        )
+                    base = self.root / "base-seat.json"
+                    out = self.root / "seat.json"
+                    analyze.analyze(self.source, config, base, self.root / "progress")
+                    analyze.analyze(
+                        self.source,
+                        {**config, "seatTrial": True},
+                        out,
+                        self.root / "progress",
+                    )
+                    baseline, report = json.loads(base.read_text()), json.loads(
+                        out.read_text()
+                    )
+                    self.assertNotIn("seatTrial", baseline)
+                    self.assertTrue(report["seatTrial"])
+                    self.assertEqual(
+                        report["seatPolicy"]["version"], "SEAT_REVALIDATION_V1"
+                    )
+                    self.assertEqual(report["events"], baseline["events"])
+                    for sample, original in zip(report["samples"], baseline["samples"]):
+                        self.assertEqual(
+                            sum(sample.pop("seatCounts").values()),
+                            int(sample["seconds"] >= 5),
+                        )
+                        for person in sample["people"]:
+                            person.pop("seatEvidence")
+                        self.assertEqual(sample, original)
+
+    def test_actual_seat_revalidation_counts_only_current_strong_samples(self):
+        real = analyze.PersonDetector
+
+        class Dip:
+            def __init__(self, path):
+                self.detector = real(path)
+                self.calls = 0
+
+            def __call__(self, frame):
+                self.calls += 1
+                d = self.detector(frame)
+                if self.calls in (13, 14):
+                    d.confidence[:] = 0.12
+                return d
+
+        out = self.root / "seat-dip.json"
+        with patch.object(analyze, "PersonDetector", Dip):
+            analyze.analyze(
+                self.source,
+                {
+                    **self.config,
+                    "seatTrial": True,
+                    "wristTrial": True,
+                    "tabletopRegions": [
+                        {**self.config["regions"][0], "id": str(uuid4())}
+                    ],
+                },
+                out,
+                self.root / "progress",
+            )
+        r = json.loads(out.read_text())
+        for sample in r["samples"]:
+            if sample["seconds"] in (6, 6.5):
+                self.assertEqual(sum(sample["seatCounts"].values()), 0)
+                self.assertEqual(
+                    sample["people"][0]["seatEvidence"]["state"], "UNKNOWN"
+                )
+                self.assertTrue(
+                    sample["people"][0]["seatEvidence"]["revalidationPending"]
+                )
+            if sample["seconds"] == 7:
+                p = sample["people"][0]
+                self.assertEqual(sum(sample["seatCounts"].values()), 1)
+                self.assertTrue(p["seatEvidence"]["resumed"])
+                self.assertEqual(p["seatEvidence"]["qualifiedAtSeconds"], 5)
+                self.assertEqual(p["seatEvidence"]["gapSeconds"], 1.5)
+                self.assertEqual(p["wristEvidence"]["state"], "CANDIDATE")
+                self.assertEqual(set(sample["tables"].values()), {"UNKNOWN"})
+        self.assertEqual(len(r["events"]), 1)
+
+    def test_worker_runs_per_seat_trial_in_real_child_process(self):
+        self.yolo26_model(yolo26_models.SMALL_MODEL)
+        service.model_state["models"] = "READY"
+        with patch.object(service, "prepare_models"), TestClient(service.app) as client:
+            tenant = str(uuid4())
+            response = client.post(
+                f"/restaurants/{tenant}/jobs",
+                json={
+                    **self.config,
+                    "poseModel": yolo26_models.SMALL_MODEL,
+                    "seatTrial": True,
+                },
+            )
+            self.assertEqual(response.status_code, 202, response.text)
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                job = client.get(
+                    f"/restaurants/{tenant}/jobs/{response.json()['id']}"
+                ).json()
+                if job["status"] != "RUNNING":
+                    break
+                time.sleep(0.1)
+            self.assertEqual(job["status"], "COMPLETED", job)
+            self.assertTrue(job["report"]["seatTrial"])
+            self.assertEqual(
+                sum(job["report"]["samples"][-1]["seatCounts"].values()), 1
+            )
 
     def test_black_frames_stay_unknown_even_with_constant_detection_graph(self):
         source = self.root / "black.avi"

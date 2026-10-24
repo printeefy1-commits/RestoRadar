@@ -53,6 +53,13 @@ describe('focused video trial contract', () => {
       false,
     );
   });
+  it('makes per-seat evidence opt-in and accepts only explicit booleans', () => {
+    expect(videoTrialSchema.parse(trial).seatTrial).toBeUndefined();
+    for (const seatTrial of [true, false])
+      expect(videoTrialSchema.parse({ ...trial, seatTrial }).seatTrial).toBe(seatTrial);
+    for (const seatTrial of ['true', 1, null])
+      expect(videoTrialSchema.safeParse({ ...trial, seatTrial }).success).toBe(false);
+  });
   it('bounds focused CPU work by table count without limiting the baseline', () => {
     const regions = Array.from({ length: 5 }, () => ({
       ...region,

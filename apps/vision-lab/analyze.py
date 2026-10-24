@@ -29,6 +29,7 @@ from focused_detection import (
 from wrist_trial import WRIST_POLICY, WristTrial, wrist_observation
 from person_duplicates import PERSON_MERGE_POLICY, suppress_aligned_torsos
 import yolo26_models
+from seat_trial import SEAT_POLICY, SeatTrial, seat_observation
 
 
 class CpuPose(RTMPose):
@@ -268,6 +269,8 @@ def analyze(source, config, output, progress):
     verifier = SeatingVerifier(table_ids)
     wrist_enabled = config.get("wristTrial", False)
     wrist_verifier = WristTrial(table_ids) if wrist_enabled else None
+    seat_enabled = config.get("seatTrial", False)
+    seat_verifier = SeatTrial(config["regions"]) if seat_enabled else None
     samples, events = [], []
     first = config["startSeconds"]
     end = first + config["durationSeconds"]
@@ -301,6 +304,7 @@ def analyze(source, config, output, progress):
                 and 5 < float(np.mean(frame)) < 250
             )
             occupied, people = set(), []
+            seat_observations = []
             detected_boxes = 0
             focus_crops = 0
             if image_ok:
@@ -374,6 +378,12 @@ def analyze(source, config, output, progress):
                                 ],
                             }
                         )
+                        if seat_enabled:
+                            seat_observations.append(
+                                seat_observation(
+                                    points[i], scores[i], score, config["regions"], w, h
+                                )
+                            )
                         if wrist_enabled:
                             person = people[-1]
                             person["wristEvidence"] = wrist_observation(
@@ -415,6 +425,10 @@ def analyze(source, config, output, progress):
             if wrist_verifier:
                 samples[-1]["wristTables"] = wrist_verifier.observe(seconds, people)
                 samples[-1]["wristResets"] = wrist_verifier.resets
+            if seat_verifier:
+                samples[-1]["seatCounts"] = seat_verifier.observe(
+                    seconds, people, seat_observations
+                )
             atomic_json(
                 progress,
                 {
@@ -472,6 +486,8 @@ def analyze(source, config, output, progress):
             tabletopRegions=config["tabletopRegions"],
             wristPolicy=WRIST_POLICY,
         )
+    if seat_enabled:
+        report.update(seatTrial=True, seatPolicy=SEAT_POLICY)
     atomic_json(output, report)
 
 

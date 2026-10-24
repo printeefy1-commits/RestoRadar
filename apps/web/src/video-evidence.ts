@@ -4,7 +4,26 @@ import type {
   WristEvidence,
   WristMotionFailure,
   WristReset,
+  SeatEvidence,
 } from '@restoradar/contracts';
+
+export const seatReasonLabels: Record<SeatEvidence['reason'], string> = {
+  NO_TRACK: 'لا يوجد تتبع صالح',
+  LOW_DETECTION_SCORE: 'رصد ضعيف؛ الحالة الحالية غير محسومة',
+  STANDING: 'وقوف ظاهر',
+  HIP_UNCERTAIN: 'موضع الحوض غير موثوق',
+  NO_SEAT_MATCH: 'الحوض خارج مناطق المقاعد',
+  AMBIGUOUS_SEAT: 'تعارض مناطق المقاعد',
+  SEAT_CONFLICT: 'أكثر من تتبع محتمل للمقعد نفسه',
+  POSE_UNCERTAIN: 'لا يوجد دليل جلوس حالي كافٍ',
+  WRIST_DWELLING: 'بانتظار تحقق دليل المعصمين',
+  POSE_MOVING: 'بدأت مدة جديدة بعد تحرك الحوض',
+  DWELLING: 'بانتظار خمس ثوانٍ من دليل الوضعية',
+  POSE_QUALIFIED: 'جلوس مرجّح بدليل الوضعية',
+  WRIST_QUALIFIED: 'جلوس مرجّح بدليل المعصمين المتحقق',
+  BOTH_QUALIFIED: 'جلوس مرجّح بدليلي الوضعية والمعصمين',
+  REVALIDATED: 'أُعيد التحقق من الجلوس برصد قوي ووضعية مقبولة',
+};
 
 export const wristReasonLabels: Record<WristEvidence['reason'], string> = {
   NO_TRACK: 'لا يوجد تتبع صالح',

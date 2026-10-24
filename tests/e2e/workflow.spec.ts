@@ -363,6 +363,7 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
         detectionMode: submitted!.detectionMode,
         poseModel: submitted!.poseModel,
         wristTrial: submitted!.wristTrial,
+        seatTrial: submitted!.seatTrial,
         tabletopRegions: submitted!.tabletopRegions,
         wristPolicy: {
           version:
@@ -499,6 +500,40 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
             },
           ],
         });
+      if (submitted!.seatTrial) {
+        report.seatPolicy = {
+          version: 'SEAT_REVALIDATION_V1',
+          seatingSeconds: 5,
+          minDetectionScore: 0.35,
+          minKeypointScore: 0.4,
+          maxRevalidationSeconds: 2,
+          maxSampleGapSeconds: 0.8,
+          initialHipDriftBoxWidths: 0.25,
+          initialHipDriftBoxHeights: 0.15,
+          revalidationRequires: 'CURRENT_SEATED_POSE_SAME_TRACK_AND_SEAT',
+        };
+        for (const sample of report.samples) {
+          sample.seatCounts = { [submitted!.regions[0].tableId]: sample.seconds === 6 ? 1 : 0 };
+          for (const person of sample.people) {
+            const qualified = sample.seconds === 6 && person.trackId === 77;
+            person.seatEvidence = {
+              state: qualified ? 'PROBABLE' : 'UNKNOWN',
+              reason: qualified ? 'WRIST_QUALIFIED' : 'LOW_DETECTION_SCORE',
+              source: qualified ? 'WRIST' : null,
+              tableId: submitted!.regions[0].tableId,
+              seatRegionId: submitted!.regions[0].id,
+              hipAnchor: null,
+              detectionScore: person.score,
+              poseSeconds: 0,
+              qualifiedAtSeconds: qualified ? 5 : null,
+              qualifiedBy: qualified ? 'WRIST' : null,
+              resumed: false,
+              revalidationPending: false,
+              gapSeconds: 0,
+            };
+          }
+        }
+      }
       return route.fulfill({ json: { id: jobId, status: 'COMPLETED', progress: 1, report } });
     }
     return route.fulfill({
@@ -537,6 +572,9 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
   await page.getByRole('button', { name: 'إضافة المنطقة', exact: true }).click();
   await expect(
     page.getByRole('checkbox', { name: 'تجربة إشارة المعصمين', exact: true }),
+  ).not.toBeChecked();
+  await expect(
+    page.getByRole('checkbox', { name: 'تجربة تثبيت الجلوس لكل مقعد', exact: true }),
   ).not.toBeChecked();
   await page.getByRole('checkbox', { name: 'تجربة إشارة المعصمين', exact: true }).check();
   await expect(
@@ -694,11 +732,13 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
     .getByRole('combobox', { name: 'نموذج تقدير الجلوس', exact: true })
     .selectOption('YOLO26_SMALL_POSE');
   await expect(page.getByText(/نموذج Small أكبر من Nano/)).toBeVisible();
+  await page.getByRole('checkbox', { name: 'تجربة تثبيت الجلوس لكل مقعد', exact: true }).check();
   await page.getByRole('button', { name: 'تحليل الفيديو على CPU', exact: true }).click();
   await expect(
     page.getByText('نموذج تقدير الجلوس في التقرير: YOLO26s-Pose', { exact: true }),
   ).toBeVisible();
   expect(submitted?.poseModel).toBe('YOLO26_SMALL_POSE');
+  expect(submitted?.seatTrial).toBe(true);
   expect(submitted?.detectionMode).toBe('FULL_FRAME');
   await page.locator('video').evaluate((element: HTMLVideoElement) => {
     element.currentTime = 6;
@@ -706,6 +746,11 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
   await page.getByText('أسباب تصفير مؤقتات المعصمين في هذه العينة', { exact: true }).click();
   await expect(page.getByText(/#39.*انقطع المؤقت بعد 4\.5 ثانية.*رصد الشخص ضعيف/)).toBeVisible();
   await expect(page.getByText(/#78.*تغيّر عرض الصندوق.*1\.3800/)).toBeVisible();
+  const seatPanel = page.getByRole('region', { name: 'تثبيت الجلوس لكل مقعد', exact: true });
+  await expect(seatPanel).toContainText('جلوس مرجّح لكل المقاعد: 1');
+  await expect(seatPanel).toContainText('جلوس مرجّح بدليل المعصمين المتحقق');
+  await page.getByRole('checkbox', { name: 'تجربة تثبيت الجلوس لكل مقعد', exact: true }).uncheck();
+  await expect(seatPanel).toBeVisible(); // A retained report describes its submitted configuration.
   const reviewDownload = page.waitForEvent('download');
   await page.getByRole('button', { name: 'تنزيل لقطات مراجعة الانقطاع', exact: true }).click();
   const reviewFile = await reviewDownload;

@@ -14,6 +14,7 @@ import {
   wristReasonLabels,
   wristResetLabels,
   wristMotionLabels,
+  seatReasonLabels,
 } from './video-evidence.ts';
 
 async function request<T>(url: string, body?: unknown, signal?: AbortSignal): Promise<T> {
@@ -47,6 +48,7 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
   const [regions, setRegions] = useState<SeatRegion[]>([]);
   const [tabletopRegions, setTabletopRegions] = useState<SeatRegion[]>([]);
   const [wristTrial, setWristTrial] = useState(false);
+  const [seatTrial, setSeatTrial] = useState(false);
   const [regionKind, setRegionKind] = useState<'SEAT' | 'TABLETOP'>('SEAT');
   const [tableId, setTableId] = useState(tables[0]?.id ?? '');
   const [job, setJob] = useState<TrialJob | null>(null);
@@ -290,6 +292,7 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
           detectionMode,
           poseModel,
           ...(wristTrial ? { wristTrial: true, tabletopRegions } : {}),
+          ...(seatTrial ? { seatTrial: true } : {}),
           regions,
         }),
       );
@@ -552,6 +555,22 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                       </select>
                     </label>
                   </>
+                )}
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={seatTrial}
+                    disabled={running}
+                    onChange={(event) => setSeatTrial(event.target.checked)}
+                  />
+                  تجربة تثبيت الجلوس لكل مقعد
+                </label>
+                {seatTrial && (
+                  <p className="muted">
+                    نتحقق أولًا من دليل قوي لخمس ثوانٍ للشخص والمقعد نفسيهما. تستخدم التجربة
+                    الوضعية، وتضيف دليل المعصمين عند تفعيله. عند انقطاع قصير تبقى الحالة غير محسومة
+                    حتى يعود رصد قوي ووضعية جلوس مقبولة خلال ثانيتين. النتائج تجريبية مستقلة.
+                  </p>
                 )}
                 {!tables.length ? (
                   <p>أضف طاولة من الإعدادات أولًا.</p>
@@ -984,6 +1003,46 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                                 </small>
                               </details>
                             )}
+                          </section>
+                        )}
+                        {report.seatTrial && (
+                          <section aria-label="تثبيت الجلوس لكل مقعد">
+                            <p>
+                              جلوس مرجّح لكل المقاعد:{' '}
+                              {Object.values(sample.seatCounts ?? {}).reduce(
+                                (sum, n) => sum + n,
+                                0,
+                              )}{' '}
+                              · أدلة حالية وليست جلسات تشغيلية.
+                            </p>
+                            {Object.entries(sample.seatCounts ?? {}).map(([id, count]) => (
+                              <p key={id}>
+                                {tableName(id)} · {count} أشخاص بأدلة مرجّحة
+                              </p>
+                            ))}
+                            {sample.people.map(
+                              (person, index) =>
+                                person.seatEvidence && (
+                                  <p key={`${person.trackId}-${index}`}>
+                                    #{person.trackId ?? '?'} ·{' '}
+                                    {seatReasonLabels[person.seatEvidence.reason]}
+                                    {person.seatEvidence.tableId &&
+                                      ` · ${tableName(person.seatEvidence.tableId)}`}{' '}
+                                    · مدة الوضعية الحالية{' '}
+                                    {person.seatEvidence.poseSeconds.toFixed(1)} ثانية
+                                    {person.seatEvidence.qualifiedAtSeconds !== null &&
+                                      ` · تحقق أول عند ${timeLabel(person.seatEvidence.qualifiedAtSeconds)}`}
+                                    {person.seatEvidence.resumed &&
+                                      ` · إعادة تحقق بعد ${person.seatEvidence.gapSeconds.toFixed(1)} ثانية`}
+                                    {person.seatEvidence.revalidationPending &&
+                                      ' · تاريخ محفوظ مؤقتًا؛ غير محسوب حاليًا'}
+                                  </p>
+                                ),
+                            )}
+                            <small className="muted">
+                              كل مقعد يُحسب مرة واحدة. الصفر لا يثبت فراغ المقاعد أو المغادرة. تبقى
+                              إشارات المعصمين وتأكيدات الطاولات منفصلة للمقارنة.
+                            </small>
                           </section>
                         )}
                       </section>

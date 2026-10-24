@@ -55,10 +55,11 @@ beforeAll(async () => {
   backend.post('/restaurants/:restaurantId/jobs', (request, reply) => {
     lastStarted = request.body;
     expect(request.params).toEqual({ restaurantId: tenant });
-    const { detectionMode, poseModel, wristTrial, tabletopRegions } = request.body as {
+    const { detectionMode, poseModel, wristTrial, tabletopRegions, seatTrial } = request.body as {
       detectionMode?: string;
       poseModel?: string;
       wristTrial?: boolean;
+      seatTrial?: boolean;
       tabletopRegions?: unknown[];
     };
     expect(['FULL_FRAME', 'SEAT_FOCUS', undefined]).toContain(detectionMode);
@@ -74,6 +75,7 @@ beforeAll(async () => {
       ...(detectionMode === undefined ? {} : { detectionMode }),
       ...(poseModel === undefined ? {} : { poseModel }),
       ...(wristTrial === undefined ? {} : { wristTrial }),
+      ...(seatTrial === undefined ? {} : { seatTrial }),
       ...(tabletopRegions === undefined ? {} : { tabletopRegions }),
     });
     return reply.code(202).send({ id: randomUUID(), status: 'RUNNING', progress: 0 });
@@ -204,6 +206,9 @@ describe('owner-only recorded-video gateway', () => {
       });
     const initial = calls;
     for (const invalid of [
+      { seatTrial: 'true' },
+      { seatTrial: 1 },
+      { seatTrial: null },
       { detectionMode: 'unexpected' },
       { poseModel: 'unexpected' },
       { poseModel: 'https://example.invalid/model.onnx' },
@@ -213,6 +218,8 @@ describe('owner-only recorded-video gateway', () => {
     expect(calls).toBe(initial);
     for (const valid of [
       {},
+      { seatTrial: true },
+      { seatTrial: false },
       { detectionMode: 'SEAT_FOCUS' },
       { poseModel: 'RTMPOSE_TINY' },
       { poseModel: 'RTMPOSE_MEDIUM' },
@@ -223,6 +230,19 @@ describe('owner-only recorded-video gateway', () => {
       { detectionMode: 'SEAT_FOCUS', poseModel: 'RTMPOSE_MEDIUM' },
     ])
       expect((await send(valid)).statusCode).toBe(202);
+  });
+  it('protects seat trials from non-owner access before contacting the worker', async () => {
+    const initial = calls;
+    for (const role of ['MANAGER', 'WAITER']) {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/restaurants/${tenant}/video-lab/jobs`,
+        headers: { cookie: identities[role].cookie },
+        payload: { ...trial, seatTrial: true },
+      });
+      expect(response.statusCode).toBe(403);
+    }
+    expect(calls).toBe(initial);
   });
   it('validates tabletop geometry, activation and table scope before starting a wrist trial', async () => {
     const send = (body: Record<string, unknown>) =>

@@ -56,6 +56,7 @@ class Trial(BaseModel):
         "RTMPOSE_TINY", "RTMPOSE_MEDIUM", "YOLO26_NANO_POSE", "YOLO26_SMALL_POSE"
     ] = "RTMPOSE_TINY"
     wristTrial: bool = Field(default=False, strict=True)
+    seatTrial: bool = Field(default=False, strict=True)
     tabletopRegions: list[Region] = Field(default_factory=list, max_length=40)
 
     @model_validator(mode="after")
