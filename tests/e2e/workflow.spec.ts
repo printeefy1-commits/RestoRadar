@@ -306,6 +306,11 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
     jobId = randomUUID();
   const video = await readFile(new URL('../fixtures/trial-preview.mp4', import.meta.url));
   let submitted: VideoTrial | undefined;
+  let reviewSourceChanged = false;
+  let downloads = 0;
+  page.on('download', () => {
+    downloads++;
+  });
   const browserErrors: string[] = [];
   page.on('pageerror', (e) => browserErrors.push(e.message));
   await page.route('**/api/restaurants/*/video-lab**', async (route) => {
@@ -475,13 +480,38 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
           },
         ],
       };
+      if (submitted!.poseModel === 'YOLO26_SMALL_POSE')
+        report.samples.unshift({
+          seconds: 0,
+          people: [],
+          tables: { [submitted!.regions[0].tableId]: 'UNKNOWN' },
+          wristResets: [
+            {
+              trackId: 39,
+              tableId: submitted!.regions[0].tableId,
+              seatRegionId: submitted!.regions[0].id,
+              reason: 'LOW_DETECTION_SCORE',
+              startedSeconds: 0,
+              lastObservedSeconds: 0,
+              stableSeconds: 0,
+              wasProbable: false,
+              detectionScore: 0.2,
+            },
+          ],
+        });
       return route.fulfill({ json: { id: jobId, status: 'COMPLETED', progress: 1, report } });
     }
     return route.fulfill({
       json: {
         enabled: true,
         models: 'READY',
-        source: { id: sourceId, duration: 8, width: 320, height: 240, bytes: video.length },
+        source: {
+          id: reviewSourceChanged ? 'c'.repeat(64) : sourceId,
+          duration: 8,
+          width: 320,
+          height: 240,
+          bytes: video.length,
+        },
       },
     });
   });
@@ -676,6 +706,62 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
   await page.getByText('أسباب تصفير مؤقتات المعصمين في هذه العينة', { exact: true }).click();
   await expect(page.getByText(/#39.*انقطع المؤقت بعد 4\.5 ثانية.*رصد الشخص ضعيف/)).toBeVisible();
   await expect(page.getByText(/#78.*تغيّر عرض الصندوق.*1\.3800/)).toBeVisible();
+  const reviewDownload = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'تنزيل لقطات مراجعة الانقطاع', exact: true }).click();
+  const reviewFile = await reviewDownload;
+  expect(reviewFile.suggestedFilename()).toBe('restoradar-review.jpg');
+  const reviewBytes = await readFile((await reviewFile.path())!);
+  expect(reviewBytes.subarray(0, 3)).toEqual(Buffer.from([0xff, 0xd8, 0xff]));
+  await reviewFile.saveAs(testInfo.outputPath('review-contact-sheet.jpg'));
+  const pixels = await page.evaluate(async (encoded) => {
+    const bitmap = await createImageBitmap(
+      new Blob([Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0))], { type: 'image/jpeg' }),
+    );
+    const image = document.createElement('canvas');
+    image.width = bitmap.width;
+    image.height = bitmap.height;
+    const ctx = image.getContext('2d')!;
+    ctx.drawImage(bitmap, 0, 0);
+    const rgba = ctx.getImageData(0, 0, image.width, image.height).data;
+    let colors = 0;
+    for (let i = 0; i < rgba.length; i += 4)
+      if (
+        Math.max(rgba[i]!, rgba[i + 1]!, rgba[i + 2]!) -
+          Math.min(rgba[i]!, rgba[i + 1]!, rgba[i + 2]!) >
+        60
+      )
+        colors++;
+    bitmap.close();
+    const firstCells = [0, 1, 2].map((column) => {
+      const part = ctx.getImageData(column * 480, 150, 480, 240).data;
+      let count = 0;
+      for (let i = 0; i < part.length; i += 4)
+        if (
+          Math.max(part[i]!, part[i + 1]!, part[i + 2]!) -
+            Math.min(part[i]!, part[i + 1]!, part[i + 2]!) >
+          60
+        )
+          count++;
+      return count / (part.length / 4);
+    });
+    return {
+      width: image.width,
+      height: image.height,
+      colored: colors / (rgba.length / 4),
+      firstCells,
+    };
+  }, reviewBytes.toString('base64'));
+  expect(pixels.width).toBeLessThanOrEqual(4096);
+  expect(pixels.height).toBeGreaterThan(700);
+  expect(pixels.height).toBeLessThanOrEqual(4096);
+  expect(pixels.colored).toBeGreaterThan(0.1);
+  for (const colored of pixels.firstCells) expect(colored).toBeGreaterThan(0.1);
+  await expect(
+    page.getByRole('button', { name: 'تنزيل لقطات مراجعة الانقطاع', exact: true }),
+  ).toBeEnabled();
+  expect(
+    await page.locator('video').evaluate((element: HTMLVideoElement) => element.currentTime),
+  ).toBeCloseTo(6, 1);
   await page
     .getByRole('combobox', { name: 'نموذج تقدير الجلوس', exact: true })
     .selectOption('YOLO26_NANO_POSE');
@@ -696,6 +782,11 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
   await expect(overlapNotice).toBeVisible();
   await page.getByRole('button', { name: 'حذف المنطقة 2', exact: true }).click();
   await expect(overlapNotice).toHaveCount(0);
+  const savedDownloads = downloads;
+  await page.getByRole('button', { name: 'تنزيل لقطات مراجعة الانقطاع', exact: true }).click();
+  reviewSourceChanged = true;
+  await expect(page.getByRole('alert')).toContainText('تغير ملف الفيديو');
+  expect(downloads).toBe(savedDownloads);
   const after = await (
     await page.request.get(`${address}/api/restaurants/${restaurantId}/dashboard`)
   ).json();

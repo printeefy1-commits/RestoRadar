@@ -7,6 +7,7 @@ import type {
   VideoTrial,
 } from '@restoradar/contracts';
 import { seatRegionSchema } from '@restoradar/contracts';
+import { makeReviewImage, reviewMoments } from './video-review.ts';
 import {
   evidenceLabels,
   trialEvidence,
@@ -15,10 +16,11 @@ import {
   wristMotionLabels,
 } from './video-evidence.ts';
 
-async function request<T>(url: string, body?: unknown): Promise<T> {
+async function request<T>(url: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const response = await fetch(url, {
     credentials: 'same-origin',
     cache: 'no-store',
+    ...(signal ? { signal } : {}),
     ...(body === undefined
       ? {}
       : {
@@ -49,6 +51,8 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
   const [tableId, setTableId] = useState(tables[0]?.id ?? '');
   const [job, setJob] = useState<TrialJob | null>(null);
   const [busy, setBusy] = useState(false);
+  const [reviewProgress, setReviewProgress] = useState<[number, number] | null>(null);
+  const reviewAbort = useRef<AbortController | null>(null);
   const [seconds, setSeconds] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [drawing, setDrawing] = useState(false);
@@ -63,6 +67,7 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
   const video = useRef<HTMLVideoElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const sourceId = useRef<string | null>(null);
+  useEffect(() => () => reviewAbort.current?.abort(), [base, status?.source?.id]);
   const validTables = new Set(tables.map((t) => t.id));
   const running = busy || job?.status === 'RUNNING';
   const tabletopDrawing = wristTrial && regionKind === 'TABLETOP';
@@ -235,6 +240,40 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
     link.download = 'restoradar-video-trial.json';
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  async function downloadReview() {
+    if (!report || !status?.source || reviewProgress || running) return;
+    if (report.sourceId !== status.source.id) {
+      setError('التقرير يخص ملف فيديو مختلفًا.');
+      return;
+    }
+    const controller = new AbortController();
+    reviewAbort.current = controller;
+    setError('');
+    setReviewProgress([0, 0]);
+    try {
+      const blob = await makeReviewImage(
+        `${base}/video`,
+        report,
+        controller.signal,
+        (done, total) => setReviewProgress([done, total]),
+      );
+      const current = await request<VideoLabStatus>(base, undefined, controller.signal);
+      controller.signal.throwIfAborted();
+      if (current.source?.id !== report.sourceId)
+        throw new Error('تغير ملف الفيديو أثناء تجهيز اللقطات. أعد فتح الصفحة.');
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'restoradar-review.jpg';
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      if (!controller.signal.aborted) setError((e as Error).message);
+    } finally {
+      reviewAbort.current = null;
+      setReviewProgress(null);
+    }
   }
   async function start() {
     if (!status?.source || running) return;
@@ -962,6 +1001,27 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                     <button className="secondary" onClick={() => download(report)}>
                       تنزيل تقرير التجربة JSON
                     </button>
+                    <button
+                      className="secondary"
+                      disabled={running || !!reviewProgress || !reviewMoments(report).length}
+                      onClick={() => {
+                        void downloadReview();
+                      }}
+                    >
+                      {reviewProgress
+                        ? `جارٍ تجهيز اللقطات (${reviewProgress[0]}/${reviewProgress[1]})`
+                        : 'تنزيل لقطات مراجعة الانقطاع'}
+                    </button>
+                    {reviewProgress && (
+                      <button onClick={() => reviewAbort.current?.abort()}>
+                        إلغاء تجهيز اللقطات
+                      </button>
+                    )}
+                    <small className="muted">
+                      صورة واحدة لآخر ثماني لحظات مناسبة، تضم قبل الانقطاع وعنده وبعده، مع تكبير
+                      الشخص وإطار الرصد. تُجهز من الفيديو في متصفحك وتُنزّل على جهازك عند الطلب.
+                      تتطلب تقريرًا يحتوي أسباب تصفير المؤقتات.
+                    </small>
                   </>
                 )}
               </section>
