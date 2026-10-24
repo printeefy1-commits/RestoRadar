@@ -37,7 +37,7 @@ RUN --mount=type=secret,id=build_ca,required=false \
 COPY --from=detector-export /export/yolo11l.onnx /export/detector.json /export/ULTRALYTICS-LICENSE /opt/restoradar-detector/
 COPY --from=yolo26-export /export26/yolo26n-pose.onnx /export26/yolo26n-pose.json /export26/yolo26s-pose.onnx /export26/yolo26s-pose.json /export26/YOLO26-LICENSE /opt/restoradar-detector/
 COPY --chown=10001:10001 apps/vision-lab/*.py ./
-RUN useradd --uid 10001 --create-home vision && mkdir /models && chown vision:vision /models
+RUN useradd --uid 10001 --create-home vision && mkdir /models /uploads && chown vision:vision /models /uploads
 USER vision
 EXPOSE 8000
 HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=5 \

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import subprocess
 import time
 import unittest
 from unittest.mock import Mock, patch
@@ -25,6 +26,7 @@ import analyze
 from decisions import SeatingVerifier, mapped_table, seated_anchor, seating_evidence
 import models
 import service
+from media import MediaStore
 import yolo26_models
 import supervision as sv
 from focused_detection import detect_with_seat_focus, seat_crops
@@ -1165,6 +1167,60 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(
                 job["report"]["models"]["detector"], "YOLO11l (COCO ONNX, 640x640)"
             )
+
+    def test_uploaded_mp4_runs_in_real_worker_child_with_its_own_source(self):
+        uploaded = self.root / "upload.mp4"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-i",
+                str(self.source),
+                "-an",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-threads",
+                "1",
+                str(uploaded),
+            ],
+            check=True,
+        )
+        service.model_state["models"] = "READY"
+        tenant = str(uuid4())
+        store = MediaStore(self.root / "uploads")
+        with (
+            patch.object(service, "uploads", store),
+            patch.object(service, "prepare_models"),
+            TestClient(service.app) as client,
+        ):
+            response = client.post(
+                f"/restaurants/{tenant}/video",
+                content=uploaded.read_bytes(),
+                headers={"Content-Type": "video/mp4"},
+            )
+            self.assertEqual(response.status_code, 201, response.text)
+            source_id = response.json()["id"]
+            self.assertNotEqual(source_id, self.config["sourceId"])
+            config = {**self.config, "sourceId": source_id, "seatTrial": True}
+            response = client.post(f"/restaurants/{tenant}/jobs", json=config)
+            self.assertEqual(response.status_code, 202, response.text)
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                job = client.get(
+                    f"/restaurants/{tenant}/jobs/{response.json()['id']}"
+                ).json()
+                if job["status"] != "RUNNING":
+                    break
+                time.sleep(0.1)
+            self.assertEqual(job["status"], "COMPLETED", job)
+            self.assertEqual(job["report"]["sourceId"], source_id)
+            self.assertEqual(
+                sum(job["report"]["samples"][-1]["seatCounts"].values()), 1
+            )
+            self.assertEqual(service.digest(self.source), self.config["sourceId"])
 
     def test_worker_runs_selected_medium_in_child_process(self):
         record = self.medium_model()

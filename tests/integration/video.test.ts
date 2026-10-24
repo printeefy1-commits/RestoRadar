@@ -1,4 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { request as httpRequest } from 'node:http';
+import { Readable } from 'node:stream';
 import Fastify from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Pool, migrate, type DatabasePool } from '@restoradar/database';
@@ -21,6 +23,10 @@ let pool: DatabasePool,
   calls = 0;
 let storedJob: TrialJob | null = null;
 let lastStarted: unknown;
+let uploadedBytes = 0;
+let firstUploadChunk: (() => void) | undefined;
+let uploadFailure = false;
+let uploadedName = '';
 const sourceId = 'a'.repeat(64);
 const trial = {
   sourceId,
@@ -36,12 +42,13 @@ beforeAll(async () => {
   backend.addHook('onRequest', async () => {
     calls++;
   });
-  backend.get('/status', () => ({
+  backend.get('/restaurants/:restaurantId/status', () => ({
     enabled: true,
     models: 'READY',
     source: { id: sourceId, duration: 60, width: 640, height: 480, bytes: 100 },
   }));
-  backend.get('/video', (request, reply) => {
+  backend.get('/restaurants/:restaurantId/video', (request, reply) => {
+    expect((request.params as { restaurantId: string }).restaurantId).toBe(tenant);
     expect(request.headers.range).toBe('bytes=0-3');
     return reply
       .code(206)
@@ -51,6 +58,27 @@ beforeAll(async () => {
         'Accept-Ranges': 'bytes',
       })
       .send(Buffer.from('test'));
+  });
+  backend.addContentTypeParser('video/mp4', (_request, payload, done) => done(null, payload));
+  backend.post('/restaurants/:restaurantId/video', async (request, reply) => {
+    expect(request.params).toEqual({ restaurantId: tenant });
+    uploadedBytes = 0;
+    uploadedName = String(request.headers['x-video-name']);
+    try {
+      for await (const chunk of request.body as Readable) {
+        uploadedBytes += chunk.length;
+        firstUploadChunk?.();
+      }
+    } catch {
+      return reply.code(400).send({ detail: 'incomplete' });
+    }
+    if (uploadFailure) return reply.code(422).send({ detail: 'فيديو غير صالح' });
+    return reply.code(201).send({ id: sourceId, uploaded: true, name: 'camera.mp4' });
+  });
+  backend.post('/restaurants/:restaurantId/video/delete', (request) => {
+    expect(request.params).toEqual({ restaurantId: tenant });
+    expect(request.body).toEqual({ sourceId });
+    return { ok: true };
   });
   backend.post('/restaurants/:restaurantId/jobs', (request, reply) => {
     lastStarted = request.body;
@@ -155,6 +183,167 @@ function get(path = '', role = 'OWNER', id = tenant) {
   });
 }
 describe('owner-only recorded-video gateway', () => {
+  it('blocks unauthorized upload/deletion and cross-origin binary requests before the worker', async () => {
+    const initial = calls;
+    for (const role of ['', 'MANAGER', 'WAITER']) {
+      const headers = role ? { cookie: identities[role].cookie } : {};
+      for (const action of ['upload', 'delete']) {
+        const response = await app.inject({
+          method: 'POST',
+          url: `/api/restaurants/${tenant}/video-lab/video${action === 'delete' ? '/delete' : ''}`,
+          headers: {
+            ...headers,
+            'Content-Type': action === 'upload' ? 'video/mp4' : 'application/json',
+          },
+          payload: action === 'upload' ? Buffer.from('video') : JSON.stringify({ sourceId }),
+        });
+        expect(response.statusCode).toBe(role ? 403 : 401);
+      }
+    }
+    for (const extra of [
+      { origin: 'https://attacker.invalid' },
+      { 'sec-fetch-site': 'cross-site' },
+    ]) {
+      expect(
+        (
+          await app.inject({
+            method: 'POST',
+            url: `/api/restaurants/${tenant}/video-lab/video`,
+            headers: { cookie: identities.OWNER.cookie, 'Content-Type': 'video/mp4', ...extra },
+            payload: Buffer.from('video'),
+          })
+        ).statusCode,
+      ).toBe(403);
+    }
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: `/api/restaurants/${otherTenant}/video-lab/video`,
+          headers: { cookie: identities.OWNER.cookie, 'Content-Type': 'video/mp4' },
+          payload: Buffer.from('video'),
+        })
+      ).statusCode,
+    ).toBe(403);
+    expect(calls).toBe(initial);
+  });
+  it('streams a chunked upload to the worker before the browser finishes sending', async () => {
+    // Use a real HTTP socket so this verifies streaming, not only inject buffering.
+    const address = await app.listen({ host: '127.0.0.1', port: 0 });
+    let resolveChunk!: () => void;
+    const arrived = new Promise<void>((resolve) => {
+      resolveChunk = resolve;
+    });
+    firstUploadChunk = resolveChunk;
+    const req = httpRequest(`${address}/api/restaurants/${tenant}/video-lab/video`, {
+      method: 'POST',
+      headers: {
+        cookie: identities.OWNER.cookie,
+        'Content-Type': 'video/mp4',
+        'X-Video-Name': 'camera.mp4',
+      },
+    });
+    const completed = new Promise<{ status: number; body: string }>((resolve, reject) => {
+      req.on('error', reject);
+      req.on('response', (response) => {
+        let body = '';
+        response.on('data', (chunk) => {
+          body += chunk;
+        });
+        response.on('end', () => resolve({ status: response.statusCode!, body }));
+      });
+    });
+    try {
+      req.write(Buffer.alloc(32 * 1024, 1));
+      await arrived;
+      expect(uploadedBytes).toBe(32 * 1024);
+      req.end(Buffer.alloc(32 * 1024, 2));
+      const response = await completed;
+      expect(response.status).toBe(201);
+      expect(JSON.parse(response.body).uploaded).toBe(true);
+      expect(uploadedBytes).toBe(64 * 1024);
+      expect(uploadedName).toBe('camera.mp4');
+    } finally {
+      firstUploadChunk = undefined;
+      req.destroy();
+    }
+  });
+  it('enforces upload bounds, preserves JSON protections and forwards validation errors', async () => {
+    const send = (headers = {}) =>
+      app.inject({
+        method: 'POST',
+        url: `/api/restaurants/${tenant}/video-lab/video`,
+        headers: { cookie: identities.OWNER.cookie, 'Content-Type': 'video/mp4', ...headers },
+        payload: Buffer.from('invalid'),
+      });
+    const initial = calls;
+    expect((await send({ 'Content-Length': String(100 * 1024 * 1024 + 1) })).statusCode).toBe(413);
+    expect((await send({ 'Content-Type': 'application/json' })).statusCode).toBe(415);
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: '/api/auth/login',
+          headers: { 'Content-Type': 'video/mp4' },
+          payload: Buffer.from('invalid'),
+        })
+      ).statusCode,
+    ).toBe(415);
+    expect(calls).toBe(initial);
+    uploadFailure = true;
+    try {
+      const failed = await send();
+      expect(failed.statusCode).toBe(422);
+      expect(failed.json().message).toBe('فيديو غير صالح');
+    } finally {
+      uploadFailure = false;
+    }
+  });
+  it('rejects an oversized chunked stream even without a declared length', async () => {
+    const address = `http://127.0.0.1:${(app.server.address() as { port: number }).port}`;
+    const req = httpRequest(`${address}/api/restaurants/${tenant}/video-lab/video`, {
+      method: 'POST',
+      headers: { cookie: identities.OWNER.cookie, 'Content-Type': 'video/mp4' },
+    });
+    const stream = Readable.from(
+      (function* () {
+        const chunk = Buffer.alloc(64 * 1024, 1);
+        for (let i = 0; i <= 1600; i++) yield chunk;
+      })(),
+    );
+    const response = new Promise<number>((resolve, reject) => {
+      req.on('error', reject);
+      req.on('response', (res) => {
+        res.resume();
+        res.on('end', () => resolve(res.statusCode!));
+      });
+    });
+    try {
+      stream.pipe(req);
+      expect(await response).toBe(413);
+      expect(uploadedBytes).toBeLessThanOrEqual(100 * 1024 * 1024);
+    } finally {
+      stream.destroy();
+      req.destroy();
+    }
+  });
+  it('checks the current source on deletion and rejects malformed source selectors', async () => {
+    const initial = calls;
+    expect((await get('/video?source=../../etc/passwd')).statusCode).toBe(400);
+    const send = (body: unknown) =>
+      app.inject({
+        method: 'POST',
+        url: `/api/restaurants/${tenant}/video-lab/video/delete`,
+        headers: { cookie: identities.OWNER.cookie },
+        payload: body as object,
+      });
+    expect((await send({ sourceId: 'bad' })).statusCode).toBe(400);
+    expect((await send({ sourceId, path: '/recordings/restaurant-demo.mp4' })).statusCode).toBe(
+      400,
+    );
+    expect(calls).toBe(initial);
+    expect((await send({ sourceId })).json()).toEqual({ ok: true });
+  });
   it('blocks unauthenticated users, other roles and other restaurants before contacting the worker', async () => {
     const initial = calls;
     expect((await app.inject({ url: `/api/restaurants/${tenant}/video-lab` })).statusCode).toBe(

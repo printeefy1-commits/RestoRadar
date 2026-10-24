@@ -1,6 +1,7 @@
 """Internal-only video trial worker. Public access goes through the authenticated edge API."""
 
 from contextlib import asynccontextmanager
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -9,15 +10,19 @@ import sys
 import tempfile
 import threading
 import time
+from urllib.parse import unquote
 from uuid import UUID, uuid4
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
+from starlette.concurrency import run_in_threadpool
+from starlette.requests import ClientDisconnect
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from models import digest, prepare
 from decisions import MAX_FOCUS_TABLES
+from media import MAX_UPLOAD_BYTES, MAX_STORAGE_BYTES, MediaStore
 
 ROOT = Path(__file__).resolve().parent
 SOURCE = Path(os.environ.get("VIDEO_SAMPLE_PATH", "/recordings/restaurant-demo.mp4"))
@@ -27,6 +32,8 @@ jobs = {}
 active = None
 sample_cache = None
 stopping = False
+media_busy = False
+uploads = MediaStore(os.environ.get("VIDEO_UPLOAD_DIR", "/uploads"))
 
 
 class Region(BaseModel):
@@ -83,12 +90,20 @@ class Trial(BaseModel):
         return self
 
 
-def sample():
+def sample(path=None, upload=False):
     global sample_cache
-    if not SOURCE.is_file():
+    path = SOURCE if path is None else Path(path)
+    if not path.is_file():
         return None
-    stat = SOURCE.stat()
-    signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    stat = path.stat()
+    signature = (
+        str(path),
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_size,
+        stat.st_mtime_ns,
+        upload,
+    )
     if sample_cache and sample_cache[0] == signature:
         return sample_cache[1]
     if stat.st_size > 2 * 1024**3:
@@ -101,11 +116,13 @@ def sample():
                 "error",
                 "-select_streams",
                 "v:0",
+                "-protocol_whitelist",
+                "file",
                 "-show_entries",
-                "format=duration:stream=width,height",
+                "format=duration,format_name:stream=width,height,codec_name,pix_fmt",
                 "-of",
                 "json",
-                str(SOURCE),
+                str(path),
             ],
             capture_output=True,
             check=True,
@@ -113,8 +130,14 @@ def sample():
         )
         info = json.loads(result.stdout)
         stream = info["streams"][0]
+        if upload and (
+            "mp4" not in info["format"]["format_name"].split(",")
+            or stream["codec_name"] != "h264"
+            or stream["pix_fmt"] not in ("yuv420p", "yuvj420p")
+        ):
+            raise HTTPException(422, "استخدم فيديو MP4 بترميز H.264 وألوان 8-bit 4:2:0")
         value = {
-            "id": digest(SOURCE),
+            "id": digest(path),
             "duration": float(info["format"]["duration"]),
             "width": int(stream["width"]),
             "height": int(stream["height"]),
@@ -132,6 +155,16 @@ def sample():
         ) from None
     sample_cache = (signature, value)
     return value
+
+
+def selected_source(tenant):
+    record = uploads.record(tenant)
+    return record if record else (SOURCE, sample())
+
+
+class DeleteVideo(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    sourceId: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
 def prepare_models():
@@ -184,7 +217,7 @@ def monitor(job, source_id):
         returncode = job["process"].wait(timeout=600)
         if returncode != 0 or not (job["path"] / "result.json").is_file():
             raise ValueError("Analysis process failed")
-        if sample()["id"] != source_id:
+        if sample(job.get("sourcePath", SOURCE))["id"] != source_id:
             raise ValueError("Source changed during analysis")
         with lock:
             job.update(status="COMPLETED", progress=1)
@@ -221,6 +254,7 @@ def monitor(job, source_id):
 async def lifespan(_app):
     global stopping
     stopping = False
+    uploads.recover()
     thread = threading.Thread(target=prepare_models, daemon=True)
     thread.start()
     yield
@@ -246,6 +280,95 @@ def status():
     return {"enabled": True, **models, "source": sample()}
 
 
+@app.get("/restaurants/{restaurant_id}/status")
+def restaurant_status(restaurant_id: UUID):
+    with lock:
+        return {
+            "enabled": True,
+            **model_state,
+            "source": selected_source(restaurant_id)[1],
+            "maxUploadBytes": MAX_UPLOAD_BYTES,
+            "mediaBusy": media_busy,
+        }
+
+
+@app.get("/restaurants/{restaurant_id}/video")
+def restaurant_video(restaurant_id: UUID, source: str | None = None):
+    with lock:
+        path, info = selected_source(restaurant_id)
+        if not info:
+            raise HTTPException(404, "لم يوجد فيديو التجربة")
+        if source is not None and source != info["id"]:
+            raise HTTPException(409, "تغير الفيديو؛ حدّث الصفحة")
+        return FileResponse(
+            path, media_type="video/mp4", headers={"Cache-Control": "no-store"}
+        )
+
+
+@app.post("/restaurants/{restaurant_id}/video", status_code=201)
+async def upload_video(restaurant_id: UUID, request: Request):
+    global media_busy
+    if request.headers.get("content-type") != "video/mp4":
+        raise HTTPException(415, "استخدم فيديو MP4")
+    length = request.headers.get("content-length")
+    if length and (not length.isdigit() or int(length) > MAX_UPLOAD_BYTES):
+        raise HTTPException(413, "الحد الأقصى للفيديو 100 ميغابايت")
+    with lock:
+        if active or media_busy or stopping:
+            raise HTTPException(409, "انتظر اكتمال التحليل أو رفع الفيديو الجاري")
+        media_busy = True
+    path = None
+    try:
+        handle, used = uploads.begin()
+        path = Path(handle.name)
+        size = 0
+        async with asyncio.timeout(120):
+            with handle:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > MAX_UPLOAD_BYTES:
+                        raise HTTPException(413, "الحد الأقصى للفيديو 100 ميغابايت")
+                    if used + size > MAX_STORAGE_BYTES:
+                        raise HTTPException(
+                            507, "مساحة الفيديوهات المرفوعة ممتلئة؛ احذف فيديو أولًا"
+                        )
+                    handle.write(chunk)
+            if not size or (length and size != int(length)):
+                raise HTTPException(422, "لم يصل ملف فيديو كامل")
+            info = await run_in_threadpool(sample, path, True)
+            if info["duration"] < 6:
+                raise HTTPException(422, "اختر فيديو مدته ست ثوانٍ على الأقل")
+            with lock:
+                return uploads.commit(
+                    restaurant_id,
+                    path,
+                    info,
+                    unquote(request.headers.get("x-video-name", "video.mp4")),
+                )
+    except ClientDisconnect:
+        raise HTTPException(400, "انقطع الاتصال قبل اكتمال رفع الفيديو") from None
+    except TimeoutError:
+        raise HTTPException(
+            408, "انتهت مهلة الرفع؛ جرّب ملفًا أصغر أو اتصالًا أسرع"
+        ) from None
+    except OSError:
+        raise HTTPException(507, "تعذر حفظ الفيديو؛ تحقق من المساحة المتاحة") from None
+    finally:
+        if path:
+            path.unlink(missing_ok=True)
+        with lock:
+            media_busy = False
+
+
+@app.post("/restaurants/{restaurant_id}/video/delete")
+def delete_video(restaurant_id: UUID, body: DeleteVideo):
+    with lock:
+        if active or media_busy:
+            raise HTTPException(409, "انتظر اكتمال التحليل أو رفع الفيديو الجاري")
+        uploads.delete(restaurant_id, body.sourceId)
+        return {"ok": True}
+
+
 @app.post("/models/retry")
 def retry():
     with lock:
@@ -268,18 +391,18 @@ def video():
 @app.post("/restaurants/{restaurant_id}/jobs", status_code=202)
 def start(restaurant_id: UUID, trial: Trial):
     global active
-    source = sample()
-    if not source:
-        raise HTTPException(404, "لم يوجد فيديو التجربة")
-    if source["id"] != trial.sourceId:
-        raise HTTPException(409, "تغير الفيديو؛ أعد فتح الصفحة وتحديد المقاعد")
-    if trial.startSeconds + 5 > source["duration"]:
-        raise HTTPException(422, "اختر بداية تتيح خمس ثوانٍ على الأقل من الفيديو")
     with lock:
         cleanup()
+        source_path, source = selected_source(restaurant_id)
+        if not source:
+            raise HTTPException(404, "لم يوجد فيديو التجربة")
+        if source["id"] != trial.sourceId:
+            raise HTTPException(409, "تغير الفيديو؛ أعد فتح الصفحة وتحديد المقاعد")
+        if trial.startSeconds + 5 > source["duration"]:
+            raise HTTPException(422, "اختر بداية تتيح خمس ثوانٍ على الأقل من الفيديو")
         if stopping or model_state["models"] != "READY":
             raise HTTPException(503, "نماذج التحليل ليست جاهزة بعد")
-        if active or len(jobs) >= 32:
+        if active or media_busy or len(jobs) >= 32:
             raise HTTPException(409, "يوجد تحليل جارٍ؛ انتظر اكتماله")
         job_id = str(uuid4())
         directory = tempfile.TemporaryDirectory(prefix="restoradar-trial-")
@@ -301,7 +424,7 @@ def start(restaurant_id: UUID, trial: Trial):
                     stderr=log,
                     env={
                         **os.environ,
-                        "VIDEO_SAMPLE_PATH": str(SOURCE),
+                        "VIDEO_SAMPLE_PATH": str(source_path),
                         "OMP_NUM_THREADS": "2",
                     },
                 )
@@ -317,6 +440,7 @@ def start(restaurant_id: UUID, trial: Trial):
             "path": path,
             "temp": directory,
             "process": process,
+            "sourcePath": source_path,
         }
         jobs[job_id] = job
         active = job

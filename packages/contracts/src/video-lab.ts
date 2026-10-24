@@ -46,11 +46,22 @@ export const videoTrialSchema = z
   });
 export type SeatRegion = z.infer<typeof seatRegionSchema>;
 export type VideoTrial = z.infer<typeof videoTrialSchema>;
+export const MAX_VIDEO_UPLOAD_BYTES = 100 * 1024 * 1024;
 export interface VideoLabStatus {
   enabled: boolean;
   models: 'DOWNLOADING' | 'READY' | 'ERROR';
   message?: string;
-  source: { id: string; duration: number; width: number; height: number; bytes: number } | null;
+  maxUploadBytes?: number;
+  mediaBusy?: boolean;
+  source: {
+    id: string;
+    duration: number;
+    width: number;
+    height: number;
+    bytes: number;
+    uploaded?: boolean;
+    name?: string;
+  } | null;
 }
 export type TrialEvidence =
   'ACCEPTED' | 'POSE_UNCERTAIN' | 'UNMAPPED' | 'AMBIGUOUS_REGIONS' | 'LOW_DETECTION_SCORE';

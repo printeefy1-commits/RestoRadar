@@ -131,7 +131,11 @@ export async function buildApp(pool: DatabasePool, options: AppOptions = {}) {
       ) {
         throw new DomainError('ORIGIN_REJECTED', 'مصدر الطلب غير مسموح', 403);
       }
-      if (!request.headers['content-type']?.startsWith('application/json'))
+      const videoUpload = request.routeOptions.config.videoUpload === true;
+      if (
+        !request.headers['content-type']?.startsWith('application/json') &&
+        !(videoUpload && request.headers['content-type'] === 'video/mp4')
+      )
         throw new DomainError('JSON_REQUIRED', 'يجب إرسال JSON', 415);
     }
   });

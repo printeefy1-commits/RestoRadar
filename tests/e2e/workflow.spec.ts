@@ -842,3 +842,139 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
   await page.screenshot({ path: testInfo.outputPath('android-video-trial.png'), fullPage: true });
   expect(browserErrors).toEqual([]);
 });
+
+test('owner uploads, replaces and deletes videos from the browser without changing live data', async ({
+  page,
+}) => {
+  await login(page, 'owner@e2e.invalid');
+  const data = await readFile(new URL('../fixtures/trial-preview.mp4', import.meta.url));
+  const original = { id: 'c'.repeat(64), duration: 6, width: 640, height: 360, bytes: data.length };
+  let source: typeof original & { uploaded?: boolean; name?: string } = original;
+  let mode: 'success' | 'invalid' | 'network' | 'cancel' = 'success';
+  let releaseUpload: (() => void) | undefined;
+  let uploads = 0,
+    deletes = 0;
+  let activeJob = false;
+  let jobExists = false;
+  const jobId = randomUUID();
+  await page.route('**/api/restaurants/*/video-lab**', async (route) => {
+    const request = route.request(),
+      path = new URL(request.url()).pathname;
+    if (path.endsWith('/video/delete')) {
+      expect(request.postDataJSON()).toEqual({ sourceId: source.id });
+      deletes++;
+      source = original;
+      return route.fulfill({ json: { ok: true } });
+    }
+    if (path.endsWith('/video') && request.method() === 'POST') {
+      uploads++;
+      expect(request.headers()['content-type']).toBe('video/mp4');
+      expect(request.postDataBuffer()).toEqual(data);
+      if (mode === 'invalid')
+        return route.fulfill({ status: 422, json: { message: 'فيديو غير صالح' } });
+      if (mode === 'network') return route.abort('connectionreset');
+      if (mode === 'cancel') {
+        await new Promise<void>((resolve) => {
+          releaseUpload = resolve;
+        });
+        await route.abort().catch(() => undefined);
+        return;
+      }
+      source = {
+        ...original,
+        id: (uploads === 1 ? 'd' : 'e').repeat(64),
+        uploaded: true,
+        name: decodeURIComponent(request.headers()['x-video-name']),
+      };
+      return route.fulfill({ status: 201, json: source });
+    }
+    if (path.endsWith('/video')) {
+      const range = request.headers().range?.match(/^bytes=(\d+)-(\d*)$/);
+      const start = range ? Number(range[1]) : 0;
+      const end = range?.[2] ? Math.min(Number(range[2]), data.length - 1) : data.length - 1;
+      return route.fulfill({
+        status: range ? 206 : 200,
+        contentType: 'video/mp4',
+        headers: {
+          'Accept-Ranges': 'bytes',
+          ...(range ? { 'Content-Range': `bytes ${start}-${end}/${data.length}` } : {}),
+        },
+        body: data.subarray(start, end + 1),
+      });
+    }
+    if (path.includes('/jobs/'))
+      return route.fulfill({
+        json: jobExists
+          ? {
+              id: jobId,
+              status: activeJob ? 'RUNNING' : 'COMPLETED',
+              progress: activeJob ? 0.1 : 1,
+            }
+          : null,
+      });
+    return route.fulfill({
+      json: { enabled: true, models: 'READY', source, maxUploadBytes: 100 * 1024 * 1024 },
+    });
+  });
+  const snapshot = async () =>
+    (await page.request.get(`${address}/api/restaurants/${restaurantId}/dashboard`)).json();
+  const before = await snapshot();
+  await page.getByRole('button', { name: 'تجربة الفيديو', exact: true }).click();
+  const choose = page.getByLabel('اختيار فيديو من الجهاز', { exact: true });
+  const file = (name: string) => ({ name, mimeType: 'video/mp4', buffer: data });
+  await page.getByText('إضافة منطقة بالأرقام بدل الرسم', { exact: true }).click();
+  for (const label of ['البداية الأفقية %', 'البداية الرأسية %', 'العرض %', 'الارتفاع %'])
+    await page.getByLabel(label, { exact: true }).fill('10');
+  await page.getByRole('button', { name: 'إضافة المنطقة', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'حذف المنطقة 1', exact: true })).toBeVisible();
+  await choose.setInputFiles(file('camera.mp4'));
+  await page.getByRole('button', { name: 'رفع الفيديو', exact: true }).click();
+  await expect(page.getByText('الفيديو المرفوع: camera.mp4', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'حذف المنطقة 1', exact: true })).toHaveCount(0);
+  await expect(page.locator('video')).toHaveAttribute('src', new RegExp(source.id));
+  const uploadedId = source.id;
+  mode = 'invalid';
+  await choose.setInputFiles(file('bad.mp4'));
+  await page.getByRole('button', { name: 'رفع فيديو بديل', exact: true }).click();
+  await expect(page.getByRole('alert')).toHaveText('فيديو غير صالح');
+  expect(source.id).toBe(uploadedId);
+  await expect(page.getByText('الفيديو المرفوع: camera.mp4', { exact: true })).toBeVisible();
+  mode = 'network';
+  await page.getByRole('button', { name: 'رفع فيديو بديل', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('انقطع الاتصال');
+  expect(source.id).toBe(uploadedId);
+  mode = 'cancel';
+  await page.getByRole('button', { name: 'رفع فيديو بديل', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'إلغاء الرفع', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'إلغاء الرفع', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('أُلغي رفع الفيديو');
+  releaseUpload?.();
+  expect(source.id).toBe(uploadedId);
+  mode = 'success';
+  await choose.setInputFiles(file('second.mp4'));
+  await page.getByRole('button', { name: 'رفع فيديو بديل', exact: true }).click();
+  await expect(page.getByText('الفيديو المرفوع: second.mp4', { exact: true })).toBeVisible();
+  jobExists = true;
+  activeJob = true;
+  await page.reload();
+  await page.getByRole('button', { name: 'تجربة الفيديو', exact: true }).click();
+  await expect(page.getByText('الفيديو المرفوع: second.mp4', { exact: true })).toBeVisible();
+  await expect(choose).toBeDisabled();
+  const remove = page.getByRole('button', { name: 'حذف الفيديو المرفوع', exact: true });
+  await expect(remove).toBeDisabled();
+  activeJob = false;
+  await expect(remove).toBeEnabled();
+  page.once('dialog', (dialog) => dialog.dismiss());
+  await remove.click();
+  expect(deletes).toBe(0);
+  page.once('dialog', (dialog) => dialog.accept());
+  await remove.click();
+  await expect(remove).toHaveCount(0);
+  await expect(page.locator('video')).toHaveAttribute('src', new RegExp(original.id));
+  expect(deletes).toBe(1);
+  const after = await snapshot();
+  expect(after.sessions).toEqual(before.sessions);
+  expect(after.alerts).toEqual(before.alerts);
+  expect(after.version).toBe(before.version);
+  await noOverflow(page);
+});

@@ -20,6 +20,7 @@ services:
     volumes:
       - ../../videos:/recordings:ro
       - vision_models:/models
+      - vision_uploads:/uploads
     read_only: true
     tmpfs:
       - /tmp:mode=1777,size=256m
@@ -36,6 +37,7 @@ services:
 
 volumes:
   vision_models:
+  vision_uploads:
 
 networks:
   video:

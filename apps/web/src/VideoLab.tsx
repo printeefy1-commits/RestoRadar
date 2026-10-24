@@ -6,7 +6,7 @@ import type {
   VideoLabStatus,
   VideoTrial,
 } from '@restoradar/contracts';
-import { seatRegionSchema } from '@restoradar/contracts';
+import { MAX_VIDEO_UPLOAD_BYTES, seatRegionSchema } from '@restoradar/contracts';
 import { makeReviewImage, reviewMoments } from './video-review.ts';
 import {
   evidenceLabels,
@@ -45,6 +45,13 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
   const base = `/api/restaurants/${restaurantId}/video-lab`;
   const [status, setStatus] = useState<VideoLabStatus | null>(null);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [mediaWorking, setMediaWorking] = useState(false);
+  const uploadRequest = useRef<XMLHttpRequest | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const statusVersion = useRef(0);
   const [regions, setRegions] = useState<SeatRegion[]>([]);
   const [tabletopRegions, setTabletopRegions] = useState<SeatRegion[]>([]);
   const [wristTrial, setWristTrial] = useState(false);
@@ -70,8 +77,9 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
   const canvas = useRef<HTMLCanvasElement>(null);
   const sourceId = useRef<string | null>(null);
   useEffect(() => () => reviewAbort.current?.abort(), [base, status?.source?.id]);
+  useEffect(() => () => uploadRequest.current?.abort(), [base]);
   const validTables = new Set(tables.map((t) => t.id));
-  const running = busy || job?.status === 'RUNNING';
+  const running = busy || mediaWorking || status?.mediaBusy === true || job?.status === 'RUNNING';
   const tabletopDrawing = wristTrial && regionKind === 'TABLETOP';
   const drawingRegions = tabletopDrawing ? tabletopRegions : regions;
   const overlappingSeats = regions.some((a, index) =>
@@ -90,18 +98,104 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
   const tableName = (id: string) => tables.find((t) => t.id === id)?.name ?? 'طاولة محذوفة';
 
   const loadStatus = useCallback(async () => {
+    const version = ++statusVersion.current;
     const next = await request<VideoLabStatus>(base);
+    if (version !== statusVersion.current) return;
     if (sourceId.current && sourceId.current !== next.source?.id) {
       setRegions([]);
       setTabletopRegions([]);
       setDraft(null);
       setDrawing(false);
       setJob(null);
+      setSeconds(0);
+      setStartSeconds(0);
+      setPlaying(false);
       setError('تغير ملف الفيديو. أعد تحديد مناطق المقاعد.');
     }
     sourceId.current = next.source?.id ?? null;
     setStatus(next);
   }, [base]);
+
+  async function refreshMedia(message: string) {
+    reviewAbort.current?.abort();
+    setRegions([]);
+    setTabletopRegions([]);
+    setDraft(null);
+    setDrawing(false);
+    setJob(null);
+    setSeconds(0);
+    setStartSeconds(0);
+    setPlaying(false);
+    await loadStatus();
+    setError('');
+    setNotice(message);
+    setUploadFile(null);
+    if (fileInput.current) fileInput.current.value = '';
+  }
+  async function uploadVideo() {
+    if (!uploadFile || running || reviewProgress) return;
+    const limit = status?.maxUploadBytes ?? MAX_VIDEO_UPLOAD_BYTES;
+    if (!/\.mp4$/i.test(uploadFile.name) || !uploadFile.size || uploadFile.size > limit) {
+      setError('اختر ملف MP4 غير فارغ بحجم لا يتجاوز 100 ميغابايت.');
+      return;
+    }
+    setMediaWorking(true);
+    setUploadProgress(0);
+    setError('');
+    setNotice('');
+    const xhr = new XMLHttpRequest();
+    uploadRequest.current = xhr;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        xhr.open('POST', `${base}/video`);
+        xhr.timeout = 180000;
+        xhr.setRequestHeader('Content-Type', 'video/mp4');
+        xhr.setRequestHeader('X-Video-Name', encodeURIComponent(uploadFile.name));
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable)
+            setUploadProgress(Math.round((event.loaded * 100) / event.total));
+        };
+        xhr.onload = () => {
+          let result: { message?: string } = {};
+          try {
+            result = JSON.parse(xhr.responseText);
+          } catch {
+            /* A proxy may return non-JSON. */
+          }
+          if (xhr.status === 201) resolve();
+          else reject(new Error(result.message ?? 'تعذر رفع الفيديو؛ حاول مجددًا.'));
+        };
+        xhr.onerror = () => reject(new Error('انقطع الاتصال أثناء الرفع؛ حاول مجددًا.'));
+        xhr.ontimeout = () => reject(new Error('انتهت مهلة الرفع؛ جرّب ملفًا أصغر.'));
+        xhr.onabort = () => reject(new Error('أُلغي رفع الفيديو.'));
+        xhr.send(uploadFile);
+      });
+      await refreshMedia('تم رفع الفيديو. ارسم مناطق المقاعد لهذا المقطع قبل التحليل.');
+    } catch (e) {
+      setError((e as Error).message);
+      // The server may have completed just before a response was interrupted.
+      void loadStatus().catch(() => undefined);
+    } finally {
+      uploadRequest.current = null;
+      setUploadProgress(null);
+      setMediaWorking(false);
+    }
+  }
+  async function deleteVideo() {
+    if (!status?.source?.uploaded || running || reviewProgress) return;
+    if (!window.confirm('حذف الفيديو المرفوع؟ سيعود فيديو التجربة الأصلي إن كان متوفرًا.')) return;
+    setMediaWorking(true);
+    setError('');
+    setNotice('');
+    try {
+      await request(`${base}/video/delete`, { sourceId: status.source.id });
+      await refreshMedia('حُذف الفيديو المرفوع. سيظهر فيديو التجربة الأصلي إن كان متوفرًا.');
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setMediaWorking(false);
+    }
+  }
   useEffect(() => {
     let live = true;
     const load = async () => {
@@ -255,7 +349,7 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
     setReviewProgress([0, 0]);
     try {
       const blob = await makeReviewImage(
-        `${base}/video`,
+        `${base}/video?source=${report.sourceId}`,
         report,
         controller.signal,
         (done, total) => setReviewProgress([done, total]),
@@ -314,6 +408,11 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
           {error}
         </p>
       )}
+      {notice && (
+        <p className="message" role="status">
+          {notice}
+        </p>
+      )}
       {!status ? (
         <p>جارٍ الاتصال بخدمة الفيديو…</p>
       ) : !status.enabled ? (
@@ -348,6 +447,57 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                 إعادة تجهيز النماذج
               </button>
             )}
+            <section aria-label="إدارة فيديو التجربة">
+              <p className="muted">
+                ارفع فيديو MP4 بترميز H.264، حتى 100 ميغابايت ومدته ست ثوانٍ على الأقل. يُرسل إلى
+                الخادم لتحليله ويبقى حتى تحذفه أو تستبدله. الرفع الجديد يستبدل الفيديو المرفوع
+                السابق بعد فحصه، ويُبقي فيديو التجربة الأصلي محفوظًا.
+              </p>
+              <label>
+                اختيار فيديو من الجهاز
+                <input
+                  ref={fileInput}
+                  type="file"
+                  accept="video/mp4,.mp4"
+                  disabled={running || !!reviewProgress}
+                  onChange={(event) => {
+                    setUploadFile(event.target.files?.[0] ?? null);
+                    setNotice('');
+                  }}
+                />
+              </label>
+              <button
+                disabled={!uploadFile || running || !!reviewProgress}
+                onClick={() => void uploadVideo()}
+              >
+                {status.source?.uploaded ? 'رفع فيديو بديل' : 'رفع الفيديو'}
+              </button>
+              {uploadProgress !== null && (
+                <>
+                  <p role="status">
+                    {uploadProgress < 100
+                      ? `جارٍ رفع الفيديو: ${uploadProgress}%`
+                      : 'اكتمل النقل؛ جارٍ فحص الفيديو…'}
+                  </p>
+                  <progress aria-label="تقدم رفع الفيديو" value={uploadProgress} max={100} />
+                  <button className="secondary" onClick={() => uploadRequest.current?.abort()}>
+                    إلغاء الرفع
+                  </button>
+                </>
+              )}
+              {status.source?.uploaded && (
+                <>
+                  <p>الفيديو المرفوع: {status.source.name ?? 'video.mp4'}</p>
+                  <button
+                    className="secondary"
+                    disabled={running || !!reviewProgress}
+                    onClick={() => void deleteVideo()}
+                  >
+                    حذف الفيديو المرفوع
+                  </button>
+                </>
+              )}
+            </section>
             {!status.source ? (
               <p>لم يوجد ملف فيديو التجربة على الخادم.</p>
             ) : (
