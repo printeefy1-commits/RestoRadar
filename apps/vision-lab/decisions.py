@@ -5,6 +5,16 @@ import math
 MIN_DETECTION_SCORE = 0.35
 MIN_KEYPOINT_SCORE = 0.4
 MAX_FOCUS_TABLES = 4
+DURATION_COMPARISON = "FLOAT_ULP_TOLERANCE_V1"
+
+
+def duration_reached(start, now, duration):
+    """Ignore only floating-point representation error at a source-time boundary."""
+    elapsed = now - start
+    tolerance = math.ulp(start) + math.ulp(now) + math.ulp(duration)
+    return elapsed >= duration or math.isclose(
+        elapsed, duration, rel_tol=0, abs_tol=tolerance
+    )
 
 
 def seated_anchor(points, scores, threshold=MIN_KEYPOINT_SCORE):
@@ -83,7 +93,7 @@ class SeatingVerifier:
                 states[table_id] = "UNKNOWN"
                 continue
             self.candidates.setdefault(table_id, seconds)
-            verified = seconds - self.candidates[table_id] >= 5.0
+            verified = duration_reached(self.candidates[table_id], seconds, 5.0)
             states[table_id] = "OCCUPIED" if verified else "UNKNOWN"
             if verified and table_id not in self.confirmed:
                 self.confirmed.add(table_id)

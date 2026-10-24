@@ -1,6 +1,8 @@
 """Synthetic seated, standing and moving cases for the optional wrist cue."""
 
 from pathlib import Path
+import json
+import math
 import sys
 import unittest
 
@@ -489,6 +491,129 @@ class WristTrialTests(unittest.TestCase):
             states = verifier.observe(step / 2, people)
         self.assertEqual(states, {"table": "PROBABLE"})
         self.assertTrue(all(p["wristEvidence"]["state"] == "PROBABLE" for p in people))
+
+    def test_exact_source_dwell_qualifies_despite_binary_roundoff(self):
+        verifier = WristTrial(["table"])
+        start = math.nextafter(30.5, math.inf)
+        for step in range(11):
+            seconds = start if step == 0 else 30.5 + step / 2
+            person = self.person()
+            state = verifier.observe(seconds, [person])["table"]
+            self.assertEqual(state, "PROBABLE" if step == 10 else "UNKNOWN")
+            self.assertEqual(verifier.resets, [])
+        weak = self.person(score=0.3039)
+        self.assertEqual(verifier.observe(36, [weak])["table"], "PROBABLE")
+
+    def test_roundoff_fix_cannot_complete_initial_dwell_with_a_weak_sample(self):
+        verifier = WristTrial(["table"])
+        start = math.nextafter(30.5, math.inf)
+        for step in range(10):
+            verifier.observe(start if step == 0 else 30.5 + step / 2, [self.person()])
+        self.assertEqual(
+            verifier.observe(35.5, [self.person(score=0.3265)]), {"table": "UNKNOWN"}
+        )
+        reset = verifier.resets[0]
+        self.assertEqual(reset["reason"], "LOW_DETECTION_SCORE")
+        self.assertEqual(reset["stableSeconds"], 4.5)
+        self.assertFalse(reset["wasProbable"])
+        self.assertEqual(reset["detectionScore"], 0.3265)
+        saved = verifier.resets[:]
+        verifier.observe(36, [self.person()])
+        self.assertEqual(verifier.resets, [])
+        self.assertEqual(saved[0]["stableSeconds"], 4.5)
+
+    def test_reset_diagnostics_identify_the_failed_motion_guard(self):
+        for change, expected in (
+            ("anchor-x", "ANCHOR_X"),
+            ("anchor-y", "ANCHOR_Y"),
+            ("center-x", "BOX_CENTER_X"),
+            ("width", "BOX_WIDTH_RATIO"),
+            ("height", "BOX_HEIGHT_RATIO"),
+            ("top", "BOX_TOP_Y"),
+            ("invalid", "INVALID_GEOMETRY"),
+        ):
+            with self.subTest(change=change):
+                self.setUp()
+                if change == "height":
+                    self.scores[5] = self.scores[6] = 0.1
+                verifier = self.verified()
+                if change == "anchor-y":
+                    for i in (5, 6):
+                        self.points[i][1] += 80
+                box = {
+                    "center-x": [360, 250, 560, 700],
+                    "width": [250, 250, 550, 700],
+                    "height": [300, 325, 500, 625],
+                    "top": [300, 320, 500, 770],
+                    "invalid": [float("nan"), 250, 500, 700],
+                }.get(change)
+                person = self.person(shift=60 if change == "anchor-x" else 0, box=box)
+                self.assertEqual(verifier.observe(5.5, [person])["table"], "UNKNOWN")
+                reset = verifier.resets[0]
+                self.assertEqual(reset["reason"], "MOVING")
+                self.assertEqual(reset["stableSeconds"], 5)
+                self.assertEqual(reset["motionFailure"]["check"], expected)
+                self.assertTrue(reset["wasProbable"])
+                if change == "width":
+                    self.assertAlmostEqual(reset["motionFailure"]["observed"], 1.5)
+                    self.assertEqual(reset["motionFailure"]["maximum"], 1.33)
+                json.dumps(reset, allow_nan=False)
+
+    def test_reset_diagnostics_distinguish_missing_gap_reference_seat_and_conflict(
+        self,
+    ):
+        for change, expected in (
+            ("missing", "MISSING_TRACK"),
+            ("gap", "TIMESTAMP_GAP"),
+            ("reference", "MOTION_REFERENCE_CHANGED"),
+            ("seat", "SEAT_CHANGED"),
+            ("conflict", "SEAT_CONFLICT"),
+        ):
+            with self.subTest(change=change):
+                self.setUp()
+                verifier = self.verified()
+                if change == "reference":
+                    self.scores[5] = self.scores[6] = 0.1
+                if change == "seat":
+                    self.seats[0]["id"] = "new-seat"
+                people = [] if change == "missing" else [self.person()]
+                if change == "conflict":
+                    people.append(self.person(track=2))
+                verifier.observe(6.5 if change == "gap" else 5.5, people)
+                self.assertEqual(len(verifier.resets), 1)
+                reset = verifier.resets[0]
+                self.assertEqual(reset["reason"], expected)
+                self.assertEqual(reset["trackId"], 1)
+                self.assertEqual(reset["seatRegionId"], "seat")
+                self.assertEqual(reset["lastObservedSeconds"], 5)
+                self.assertEqual(reset["stableSeconds"], 5)
+
+    def test_standing_or_unreliable_wrists_still_reset_qualified_evidence(self):
+        for change, expected in (
+            ("standing", "STANDING"),
+            ("wrist", "WRIST_UNCERTAIN"),
+        ):
+            with self.subTest(change=change):
+                self.setUp()
+                verifier = self.verified()
+                if change == "standing":
+                    self.points[13] = self.points[14] = [400.0, 700.0]
+                else:
+                    self.scores[9] = self.scores[10] = 0.1
+                self.assertEqual(
+                    verifier.observe(5.5, [self.person()])["table"], "UNKNOWN"
+                )
+                self.assertEqual(verifier.resets[0]["reason"], expected)
+                self.assertEqual(verifier.candidates, {})
+
+    def test_continuity_and_score_grace_do_not_emit_false_resets(self):
+        self.overlap()
+        verifier = self.verified()
+        self.ambiguous_hips()
+        person = self.person(score=0.3039)
+        self.assertEqual(verifier.observe(5.5, [person])["table"], "PROBABLE")
+        self.assertEqual(verifier.resets, [])
+        self.assertEqual(person["wristEvidence"]["seatResolution"], "CONTINUITY")
 
 
 if __name__ == "__main__":

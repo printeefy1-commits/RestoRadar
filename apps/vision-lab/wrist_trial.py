@@ -3,10 +3,17 @@
 import math
 from collections import Counter
 
-from decisions import MIN_DETECTION_SCORE, MIN_KEYPOINT_SCORE, matching_tables
+from decisions import (
+    DURATION_COMPARISON,
+    MIN_DETECTION_SCORE,
+    MIN_KEYPOINT_SCORE,
+    duration_reached,
+    matching_tables,
+)
 
 WRIST_POLICY = {
-    "version": "WRIST_SEAT_DWELL_V3",
+    "version": "WRIST_SEAT_DWELL_V4",
+    "durationComparison": DURATION_COMPARISON,
     "startDetectionScore": MIN_DETECTION_SCORE,
     "continueDetectionScore": 0.30,
     "maxLowScoreSeconds": 1.0,
@@ -115,32 +122,49 @@ def wrist_observation(points, scores, box, track_id, score, seats, tops, width, 
     }
 
 
-def stationary(previous, person):
+def motion_failure(previous, person):
+    """Explain the first failed guard; the existing motion limits stay unchanged."""
     cue, box = person["wristEvidence"], person["box"]
     ref, anchor = previous["box"], cue["motionAnchor"]
+
+    def failure(check, observed=None, minimum=None, maximum=None):
+        return {
+            "check": check,
+            "observed": observed,
+            "minimum": minimum,
+            "maximum": maximum,
+        }
+
     if cue["motionSource"] != previous["motionSource"]:
-        return False
+        return failure("REFERENCE_CHANGED")
     dx = WRIST_POLICY["maxDriftBoxWidths"] * (ref[2] - ref[0])
     dy = WRIST_POLICY["maxDriftBoxHeights"] * (ref[3] - ref[1])
     if dx <= 0 or dy <= 0 or any(not math.isfinite(v) for v in [*box, *anchor]):
-        return False
+        return failure("INVALID_GEOMETRY")
     # Always compare with the first position, never accumulate small steps.
-    if (
-        abs(anchor[0] - previous["anchor"][0]) > dx
-        or abs(anchor[1] - previous["anchor"][1]) > dy
-    ):
-        return False
-    if (
-        abs((box[0] + box[2] - ref[0] - ref[2]) / 2) > dx
-        or not 0.75 <= (box[2] - box[0]) / (ref[2] - ref[0]) <= 1.33
-    ):
-        return False
+    checks = [
+        ("ANCHOR_X", abs(anchor[0] - previous["anchor"][0]), 0, dx),
+        ("ANCHOR_Y", abs(anchor[1] - previous["anchor"][1]), 0, dy),
+        ("BOX_CENTER_X", abs((box[0] + box[2] - ref[0] - ref[2]) / 2), 0, dx),
+        ("BOX_WIDTH_RATIO", (box[2] - box[0]) / (ref[2] - ref[0]), 0.75, 1.33),
+    ]
     if cue["motionSource"] == "BOX_CENTER":
         # Without two reliable shoulders retain the conservative height guard.
-        return 0.75 <= (box[3] - box[1]) / (ref[3] - ref[1]) <= 1.33
+        checks.append(
+            ("BOX_HEIGHT_RATIO", (box[3] - box[1]) / (ref[3] - ref[1]), 0.75, 1.33)
+        )
+    else:
+        checks.append(("BOX_TOP_Y", abs(box[1] - ref[1]), 0, dy))
     # Shoulder motion, horizontal position/width and the top edge must stay
     # stable. Only the bottom edge may change as body/torso crops alternate.
-    return abs(box[1] - ref[1]) <= dy
+    for check, value, lower, upper in checks:
+        if not lower <= value <= upper:
+            return failure(check, value, lower, upper)
+    return None
+
+
+def stationary(previous, person):
+    return motion_failure(previous, person) is None
 
 
 def can_continue_score(previous, person, seconds):
@@ -165,13 +189,17 @@ class WristTrial:
         self.table_ids = set(table_ids)
         self.candidates = {}
         self.last_time = None
+        self.resets = []
 
     def observe(self, seconds, people):
         if not math.isfinite(seconds) or (
             self.last_time is not None and seconds <= self.last_time
         ):
             raise ValueError("Video timestamps must increase")
-        if self.last_time is not None and seconds - self.last_time > 0.8:
+        previous_time, histories = self.last_time, self.candidates.copy()
+        self.resets = []
+        gap = self.last_time is not None and seconds - self.last_time > 0.8
+        if gap:
             self.candidates.clear()
         self.last_time = seconds
         for person in people:
@@ -262,14 +290,56 @@ class WristTrial:
                     else previous["lastStrongSeconds"]
                 ),
                 "qualified": previous["qualified"]
-                or seconds - previous["start"] >= WRIST_POLICY["seconds"],
+                or duration_reached(
+                    previous["start"], seconds, WRIST_POLICY["seconds"]
+                ),
             }
             current[key] = previous
             cue["stableSeconds"] = round(seconds - previous["start"], 3)
-            if seconds - previous["start"] >= WRIST_POLICY["seconds"]:
+            if duration_reached(previous["start"], seconds, WRIST_POLICY["seconds"]):
                 cue.update(state="PROBABLE", reason="PROBABLE")
                 states[cue["tableId"]] = "PROBABLE"
         # A missing/weak wrist, changed track, missing frame or conflict drops
         # that candidate. There is no last-known occupied state or arrival event.
         self.candidates = current
+        # Diagnostics describe discarded history only. They never carry state
+        # across a miss or influence qualification or the live seating path.
+        for key, history in histories.items():
+            if key in current and current[key]["start"] == history["start"]:
+                continue
+            matching = [p for p in people if p["trackId"] == key[0]]
+            person = matching[0] if len(matching) == 1 else None
+            cue = person["wristEvidence"] if person else None
+            detail = None
+            if gap:
+                reason = "TIMESTAMP_GAP"
+            elif not matching:
+                reason = "MISSING_TRACK"
+            elif len(matching) > 1:
+                reason = "SEAT_CONFLICT"
+            elif cue["reason"] == "MOVING":
+                reason = "MOVING"
+                detail = motion_failure(history, person)
+            elif cue["reason"] in ("DWELLING", "PROBABLE"):
+                reason = (
+                    "MOTION_REFERENCE_CHANGED"
+                    if cue["motionSource"] != history["motionSource"]
+                    else "SEAT_CHANGED"
+                )
+            else:
+                reason = cue["reason"]
+            reset = {
+                "trackId": key[0],
+                "seatRegionId": key[1],
+                "tableId": key[2],
+                "reason": reason,
+                "startedSeconds": history["start"],
+                "lastObservedSeconds": previous_time,
+                "stableSeconds": round(previous_time - history["start"], 3),
+                "wasProbable": history["qualified"],
+                "detectionScore": cue["detectionScore"] if cue else None,
+            }
+            if detail is not None:
+                reset["motionFailure"] = detail
+            self.resets.append(reset)
         return states

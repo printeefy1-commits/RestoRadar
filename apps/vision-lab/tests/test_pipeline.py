@@ -454,10 +454,11 @@ class RuntimeTests(unittest.TestCase):
                                 "minDetectionScore": 0.35,
                                 "minKeypointScore": 0.4,
                                 "seatingSeconds": 5,
+                                "durationComparison": "FLOAT_ULP_TOLERANCE_V1",
                             },
                         )
                         self.assertEqual(
-                            report["wristPolicy"]["version"], "WRIST_SEAT_DWELL_V3"
+                            report["wristPolicy"]["version"], "WRIST_SEAT_DWELL_V4"
                         )
                         self.assertEqual(len(report["events"]), int(score == 1))
                         if score == 1:
@@ -655,6 +656,7 @@ class RuntimeTests(unittest.TestCase):
                             "minDetectionScore": 0.35,
                             "minKeypointScore": 0.4,
                             "seatingSeconds": 5,
+                            "durationComparison": "FLOAT_ULP_TOLERANCE_V1",
                         },
                     )
                     self.assertFalse(report["departureEvaluated"])
@@ -771,7 +773,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(report["events"], [])
         self.assertEqual(baseline["events"], [])
         self.assertTrue(report["wristTrial"])
-        self.assertEqual(report["wristPolicy"]["version"], "WRIST_SEAT_DWELL_V3")
+        self.assertEqual(report["wristPolicy"]["version"], "WRIST_SEAT_DWELL_V4")
         probable = [
             s for s in report["samples"] if "PROBABLE" in s["wristTables"].values()
         ]
@@ -788,6 +790,7 @@ class RuntimeTests(unittest.TestCase):
                     p for p in person["posePoints"] if "WRIST" not in p["part"]
                 ]
             sample.pop("wristTables")
+            self.assertEqual(sample.pop("wristResets"), [])
             self.assertEqual(sample, original)
 
     def test_score_dip_preserves_only_wrist_evidence_in_actual_runtime(self):
@@ -841,7 +844,51 @@ class RuntimeTests(unittest.TestCase):
                     point for point in p["posePoints"] if "WRIST" not in point["part"]
                 ]
             current.pop("wristTables")
+            self.assertEqual(current.pop("wristResets"), [])
             self.assertEqual(current, original)
+
+    def test_reset_diagnostics_export_raw_score_and_preceding_source_dwell(self):
+        real_detector = analyze.PersonDetector
+
+        class InitialScoreDip:
+            def __init__(self, path):
+                self.detector = real_detector(path)
+                self.calls = 0
+
+            def __call__(self, frame):
+                self.calls += 1
+                detected = self.detector(frame)
+                if self.calls == 11:  # First five seconds are not yet qualified.
+                    detected.confidence[:] = 0.3265
+                return detected
+
+        output = self.root / "resets.json"
+        with patch.object(analyze, "PersonDetector", InitialScoreDip):
+            analyze.analyze(
+                self.source,
+                {
+                    **self.config,
+                    "wristTrial": True,
+                    "tabletopRegions": [
+                        {**self.config["regions"][0], "id": str(uuid4())}
+                    ],
+                },
+                output,
+                self.root / "progress",
+            )
+        report = json.loads(output.read_text())
+        resets = [
+            (s["seconds"], r) for s in report["samples"] for r in s["wristResets"]
+        ]
+        self.assertEqual(len(resets), 1)
+        seconds, reset = resets[0]
+        self.assertEqual(seconds, 5)
+        self.assertEqual(reset["reason"], "LOW_DETECTION_SCORE")
+        self.assertEqual(reset["stableSeconds"], 4.5)
+        self.assertEqual(reset["lastObservedSeconds"], 4.5)
+        self.assertFalse(reset["wasProbable"])
+        self.assertAlmostEqual(reset["detectionScore"], 0.3265, places=6)
+        self.assertEqual(report["events"], [])
 
     def test_black_frames_stay_unknown_even_with_constant_detection_graph(self):
         source = self.root / "black.avi"

@@ -7,7 +7,13 @@ import type {
   VideoTrial,
 } from '@restoradar/contracts';
 import { seatRegionSchema } from '@restoradar/contracts';
-import { evidenceLabels, trialEvidence, wristReasonLabels } from './video-evidence.ts';
+import {
+  evidenceLabels,
+  trialEvidence,
+  wristReasonLabels,
+  wristResetLabels,
+  wristMotionLabels,
+} from './video-evidence.ts';
 
 async function request<T>(url: string, body?: unknown): Promise<T> {
   const response = await fetch(url, {
@@ -899,6 +905,46 @@ export function VideoLab({ restaurantId, tables }: { restaurantId: string; table
                                   : 'إشارة المعصمين غير محسومة'}
                               </p>
                             ))}
+                            {!!sample.wristResets?.length && (
+                              <details>
+                                <summary>أسباب تصفير مؤقتات المعصمين في هذه العينة</summary>
+                                {sample.wristResets.map((reset, index) => (
+                                  <p key={`${reset.trackId}-${reset.seatRegionId}-${index}`}>
+                                    #{reset.trackId} · {tableName(reset.tableId)} · انقطع المؤقت بعد{' '}
+                                    {reset.stableSeconds.toFixed(1)} ثانية ·{' '}
+                                    {wristResetLabels[reset.reason]}
+                                    {reset.detectionScore !== null && (
+                                      <>
+                                        {' '}
+                                        · درجة الرصد <bdi>{reset.detectionScore.toFixed(5)}</bdi>
+                                      </>
+                                    )}
+                                    {reset.motionFailure && (
+                                      <>
+                                        {' '}
+                                        · {wristMotionLabels[reset.motionFailure.check]}
+                                        {reset.motionFailure.observed !== null && (
+                                          <>
+                                            {' '}
+                                            · القيمة{' '}
+                                            <bdi>{reset.motionFailure.observed.toFixed(4)}</bdi> ·
+                                            المجال{' '}
+                                            <bdi>
+                                              {reset.motionFailure.minimum?.toFixed(4)}–
+                                              {reset.motionFailure.maximum?.toFixed(4)}
+                                            </bdi>
+                                          </>
+                                        )}
+                                      </>
+                                    )}
+                                  </p>
+                                ))}
+                                <small className="muted">
+                                  الإزاحات نسب إلى أبعاد الصورة، وتغيّر الحجم نسبة إلى الصندوق
+                                  المرجعي. هذا تشخيص للرصد ولا يثبت حركة فعلية أو مغادرة.
+                                </small>
+                              </details>
+                            )}
                           </section>
                         )}
                       </section>

@@ -13,6 +13,7 @@ from rtmlib import RTMPose
 import supervision as sv
 
 from decisions import (
+    DURATION_COMPARISON,
     MIN_DETECTION_SCORE,
     MIN_KEYPOINT_SCORE,
     SeatingVerifier,
@@ -413,6 +414,7 @@ def analyze(source, config, output, progress):
             )
             if wrist_verifier:
                 samples[-1]["wristTables"] = wrist_verifier.observe(seconds, people)
+                samples[-1]["wristResets"] = wrist_verifier.resets
             atomic_json(
                 progress,
                 {
@@ -456,6 +458,7 @@ def analyze(source, config, output, progress):
             "minDetectionScore": MIN_DETECTION_SCORE,
             "minKeypointScore": MIN_KEYPOINT_SCORE,
             "seatingSeconds": 5,
+            "durationComparison": DURATION_COMPARISON,
         },
         "regions": config["regions"],
         "events": events,

@@ -360,7 +360,10 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
         wristTrial: submitted!.wristTrial,
         tabletopRegions: submitted!.tabletopRegions,
         wristPolicy: {
-          version: 'WRIST_SEAT_DWELL_V1',
+          version:
+            submitted!.poseModel === 'YOLO26_SMALL_POSE'
+              ? 'WRIST_SEAT_DWELL_V4'
+              : 'WRIST_SEAT_DWELL_V1',
           seconds: 5,
           minKeypointScore: 0.4,
           maxDriftBoxWidths: 0.25,
@@ -435,6 +438,40 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
             ],
             tables: { [submitted!.regions[0].tableId]: 'UNKNOWN' },
             wristTables: { [submitted!.regions[0].tableId]: 'PROBABLE' },
+            ...(submitted!.poseModel === 'YOLO26_SMALL_POSE'
+              ? {
+                  wristResets: [
+                    {
+                      trackId: 39,
+                      tableId: submitted!.regions[0].tableId,
+                      seatRegionId: submitted!.regions[0].id,
+                      reason: 'LOW_DETECTION_SCORE' as const,
+                      startedSeconds: 0,
+                      lastObservedSeconds: 4.5,
+                      stableSeconds: 4.5,
+                      wasProbable: false,
+                      detectionScore: 0.3265,
+                    },
+                    {
+                      trackId: 78,
+                      tableId: submitted!.regions[0].tableId,
+                      seatRegionId: submitted!.regions[0].id,
+                      reason: 'MOVING' as const,
+                      startedSeconds: 0,
+                      lastObservedSeconds: 5.5,
+                      stableSeconds: 5.5,
+                      wasProbable: true,
+                      detectionScore: 0.9,
+                      motionFailure: {
+                        check: 'BOX_WIDTH_RATIO' as const,
+                        observed: 1.38,
+                        minimum: 0.75,
+                        maximum: 1.33,
+                      },
+                    },
+                  ],
+                }
+              : {}),
           },
         ],
       };
@@ -633,6 +670,12 @@ test('Android video trial: authenticated preview, seat mapping, report and no li
   ).toBeVisible();
   expect(submitted?.poseModel).toBe('YOLO26_SMALL_POSE');
   expect(submitted?.detectionMode).toBe('FULL_FRAME');
+  await page.locator('video').evaluate((element: HTMLVideoElement) => {
+    element.currentTime = 6;
+  });
+  await page.getByText('أسباب تصفير مؤقتات المعصمين في هذه العينة', { exact: true }).click();
+  await expect(page.getByText(/#39.*انقطع المؤقت بعد 4\.5 ثانية.*رصد الشخص ضعيف/)).toBeVisible();
+  await expect(page.getByText(/#78.*تغيّر عرض الصندوق.*1\.3800/)).toBeVisible();
   await page
     .getByRole('combobox', { name: 'نموذج تقدير الجلوس', exact: true })
     .selectOption('YOLO26_NANO_POSE');

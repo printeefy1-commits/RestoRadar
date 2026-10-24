@@ -105,6 +105,37 @@ export interface TrialPerson {
     score: number;
   }[];
 }
+export interface WristMotionFailure {
+  check:
+    | 'REFERENCE_CHANGED'
+    | 'INVALID_GEOMETRY'
+    | 'ANCHOR_X'
+    | 'ANCHOR_Y'
+    | 'BOX_CENTER_X'
+    | 'BOX_WIDTH_RATIO'
+    | 'BOX_HEIGHT_RATIO'
+    | 'BOX_TOP_Y';
+  observed: number | null;
+  minimum: number | null;
+  maximum: number | null;
+}
+export interface WristReset {
+  trackId: number;
+  tableId: string;
+  seatRegionId: string;
+  reason:
+    | WristEvidence['reason']
+    | 'MISSING_TRACK'
+    | 'TIMESTAMP_GAP'
+    | 'MOTION_REFERENCE_CHANGED'
+    | 'SEAT_CHANGED';
+  startedSeconds: number;
+  lastObservedSeconds: number;
+  stableSeconds: number;
+  wasProbable: boolean;
+  detectionScore: number | null;
+  motionFailure?: WristMotionFailure;
+}
 export interface TrialReport {
   mode: 'RECORDED_VIDEO_DRY_RUN';
   detectionMode?: 'FULL_FRAME' | 'SEAT_FOCUS';
@@ -120,12 +151,19 @@ export interface TrialReport {
   processingSeconds: number;
   samplesPerProcessingSecond: number;
   departureEvaluated: false;
-  evidencePolicy?: { minDetectionScore: number; minKeypointScore: number; seatingSeconds: number };
+  evidencePolicy?: {
+    minDetectionScore: number;
+    minKeypointScore: number;
+    seatingSeconds: number;
+    durationComparison?: 'FLOAT_ULP_TOLERANCE_V1';
+  };
   regions: SeatRegion[];
   wristTrial?: boolean;
   tabletopRegions?: SeatRegion[];
   wristPolicy?: {
-    version: 'WRIST_SEAT_DWELL_V1' | 'WRIST_SEAT_DWELL_V2' | 'WRIST_SEAT_DWELL_V3';
+    version:
+      'WRIST_SEAT_DWELL_V1' | 'WRIST_SEAT_DWELL_V2' | 'WRIST_SEAT_DWELL_V3' | 'WRIST_SEAT_DWELL_V4';
+    durationComparison?: 'FLOAT_ULP_TOLERANCE_V1';
     startDetectionScore?: number;
     continueDetectionScore?: number;
     maxLowScoreSeconds?: number;
@@ -150,6 +188,7 @@ export interface TrialReport {
     people: TrialPerson[];
     tables: Record<string, 'OCCUPIED' | 'UNKNOWN'>;
     wristTables?: Record<string, 'PROBABLE' | 'UNKNOWN'>;
+    wristResets?: WristReset[];
   }[];
 }
 export interface TrialJob {
